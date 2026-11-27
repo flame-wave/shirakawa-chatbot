@@ -1,0 +1,294 @@
+// 同意画面に出す文言。
+//
+// 【書くときの約束】
+// ここに書いてあることと、実際に送っているものを必ず一致させる。
+// 実装を変えたら、この文言も必ず見直すこと。
+//
+// いま実際に起きていること（2026-09-30 時点）:
+//   送る     … 質問の内容（文字）／答えられたか／言語／日時／どの案内所か
+//              体験アンケート（〇△×）に答えた場合は、その答え
+//   送らない … 声そのもの・氏名や連絡先・現在地の座標
+//   ただし   … 音声認識のため、声はブラウザの音声認識サービスへ送られる
+//              （Chromeの場合はGoogle。こちらでは受け取らず、保存もしない）
+//              質問集で答えられない質問は、文字にした内容を外部のAIへ送る
+
+/// 提供者の表示。日本語の画面にはこれがそのまま出る。
+export const PROVIDER = '名古屋大学 情報学部／大学院情報学研究科　遠藤・浦田研究室';
+
+export const CONSENT = {
+  ja: {
+    title: '白川郷AI観光ガイド',
+    // 同意画面の上の大きな見出しに出す（何ができるかを、ひと目で伝える）
+    lead: '白川郷のことを、声で聞くだけ。AIガイドがお答えします。',
+    examples: ['🚻 トイレはどこ？', '🚌 バスの時刻は？', '🏔️ 展望台への行き方', '🍜 おすすめの食事'],
+    languages: '6か国語に対応',
+    start: '下のボタンを押して、話しかけてください',
+    // スマートフォンで本文の代わりに出す要約（全文は「詳しく見る」で開く）
+    summary: [
+      '記録するもの：質問の文字・言語・日時・体験アンケートの答え',
+      '記録しないもの：お声・お名前・現在地',
+      '質問集にない質問は、外部のAIで回答を作ります',
+    ],
+    locationNote: '近くの案内所に合わせて答えるため、このあと現在地の利用をおたずねします（現在地は記録しません）',
+    more: '詳しく見る',
+    less: '閉じる',
+    provider: PROVIDER + ' が提供しています。',
+    purpose: 'このアプリは、観光案内をよりよくするための研究として運用しています。'
+      + 'ご利用の記録は、案内の改善と研究にのみ使います。',
+    recordTitle: '記録すること',
+    record: [
+      '質問された内容（文字にしたもの）',
+      '答えられたかどうか・選ばれた言語・日時',
+      'どちらの案内所で使われたか',
+      '体験アンケート（〇△×）にお答えいただいた場合は、その答え',
+    ],
+    keepTitle: '記録しないこと',
+    keep: [
+      'お声そのもの',
+      'お名前・連絡先など、どなたかが分かる情報',
+      '現在地の座標（近い案内所を選ぶためだけに使います）',
+    ],
+    noteTitle: 'ご承知おきください',
+    note: [
+      '声で質問されるときは、聞き取りのためにブラウザの音声認識サービス'
+        + '（Chromeの場合はGoogle）へお声が送られます。',
+      '質問集にない質問は、文字にした内容を外部のAIサービスへ送って回答を作ります。',
+    ],
+    closing: '記録は統計としてのみ扱い、どなたかが分かる形で公表することはありません。',
+    agree: '同意して使う',
+    decline: '記録せずに使う',
+    declineHint: '「記録せずに使う」を選んでも、案内はすべてお使いいただけます。',
+  },
+
+  en: {
+    title: 'Shirakawa-go AI Guide',
+    // 同意画面の上の大きな見出しに出す（何ができるかを、ひと目で伝える）
+    lead: 'Ask anything about Shirakawa-go — just speak. Our AI guide will answer.',
+    examples: ['🚻 Where is the toilet?', '🚌 Bus times', '🏔️ Way to the viewpoint', '🍜 Where to eat'],
+    languages: '6 languages',
+    start: 'Tap the button below and start talking',
+    // スマートフォンで本文の代わりに出す要約（全文は「詳しく見る」で開く）
+    summary: [
+      'We record: your question (as text), the language, the date and time, and your survey answers',
+      'We do not record: your voice, your name, or your location',
+      'Questions not in our list are answered by an external AI service',
+    ],
+    locationNote: 'To answer for the nearest information centre, we will ask to use your location next (it is not recorded)',
+    more: 'Details',
+    less: 'Hide details',
+    provider: 'Provided by the Endo and Urata Laboratory, School of Informatics and '
+      + 'Graduate School of Informatics, Nagoya University.',
+    purpose: 'This guide is operated as a research project to improve tourist '
+      + 'information. Your usage records are used only to improve the guide and for research.',
+    recordTitle: 'What we record',
+    record: [
+      'The content of your question (as text)',
+      'Whether it could be answered, the language you chose, and the date and time',
+      'Which information centre it was used at',
+      'Your answer to the short experience survey (〇△×), if you give one',
+    ],
+    keepTitle: 'What we do not record',
+    keep: [
+      'Your voice itself',
+      'Your name, contact details, or anything identifying you',
+      'Your exact location (used only to choose the nearest information centre)',
+    ],
+    noteTitle: 'Please note',
+    note: [
+      'When you speak, your voice is sent to your browser’s speech recognition '
+        + 'service (Google, if you are using Chrome) so that it can be transcribed.',
+      'If your question is not in our list, the text is sent to an external AI service '
+        + 'to compose an answer.',
+    ],
+    closing: 'Records are used only as statistics and are never published in a form '
+      + 'that identifies anyone.',
+    agree: 'Agree and continue',
+    decline: 'Use without recording',
+    declineHint: 'If you choose “Use without recording”, '
+      + 'every part of the guide still works.',
+  },
+
+  zh: {
+    title: '白川乡AI旅游向导',
+    // 同意画面の上の大きな見出しに出す（何ができるかを、ひと目で伝える）
+    lead: '关于白川乡的问题，开口问就行。AI向导为您解答。',
+    examples: ['🚻 洗手间在哪里？', '🚌 巴士时刻', '🏔️ 怎么去观景台', '🍜 推荐美食'],
+    languages: '支持6种语言',
+    start: '请点击下方按钮，开始提问',
+    // スマートフォンで本文の代わりに出す要約（全文は「詳しく見る」で開く）
+    summary: [
+      '记录：问题文字、语言、日期时间、体验问卷的回答',
+      '不记录：您的声音、姓名、位置',
+      '问题集中没有的问题，将由外部AI生成回答',
+    ],
+    locationNote: '为了按最近的导览处回答，接下来会询问是否使用您的位置（不会记录）',
+    more: '查看详情',
+    less: '收起',
+    provider: '由名古屋大学 信息学部／研究生院信息学研究科　远藤・浦田研究室提供。',
+    purpose: '本导览作为改进旅游信息服务的研究项目运行。使用记录仅用于改进导览与研究。',
+    recordTitle: '记录的内容',
+    record: [
+      '您提问的内容（转换为文字）',
+      '是否能够回答、所选语言、日期和时间',
+      '在哪个导览处使用',
+      '如您回答体验问卷（〇△×），您的回答',
+    ],
+    keepTitle: '不记录的内容',
+    keep: [
+      '您的声音本身',
+      '姓名、联系方式等可识别个人的信息',
+      '您的具体位置（仅用于判断最近的导览处）',
+    ],
+    noteTitle: '请注意',
+    note: [
+      '使用语音提问时，为了转写文字，您的声音会发送至浏览器的语音识别服务'
+        + '（使用Chrome时为Google）。',
+      '如果问题不在问答集中，文字内容会发送至外部AI服务以生成回答。',
+    ],
+    closing: '记录仅作为统计使用，绝不会以可识别个人的形式公开。',
+    agree: '同意并使用',
+    decline: '不记录直接使用',
+    declineHint: '即使选择「不记录直接使用」，导览的所有功能仍可正常使用。',
+  },
+
+  ko: {
+    title: '시라카와고 AI 관광 가이드',
+    // 同意画面の上の大きな見出しに出す（何ができるかを、ひと目で伝える）
+    lead: '시라카와고에 대해 말로 물어보세요. AI 가이드가 답해 드립니다.',
+    examples: ['🚻 화장실은 어디예요?', '🚌 버스 시간', '🏔️ 전망대 가는 길', '🍜 추천 음식'],
+    languages: '6개 언어 지원',
+    start: '아래 버튼을 누르고 말씀해 주세요',
+    // スマートフォンで本文の代わりに出す要約（全文は「詳しく見る」で開く）
+    summary: [
+      '기록하는 것: 질문 내용(문자), 언어, 일시, 체험 설문 응답',
+      '기록하지 않는 것: 음성, 이름, 현재 위치',
+      '질문집에 없는 질문은 외부 AI로 답변을 만듭니다',
+    ],
+    locationNote: '가까운 안내소에 맞춰 답변하기 위해, 다음에 현재 위치 사용을 여쭙니다(위치는 기록하지 않습니다)',
+    more: '자세히 보기',
+    less: '닫기',
+    provider: '나고야대학 정보학부／대학원 정보학연구과　엔도・우라타 연구실이 제공합니다.',
+    purpose: '이 안내는 관광 안내를 개선하기 위한 연구로 운영되고 있습니다. '
+      + '이용 기록은 안내 개선과 연구에만 사용합니다.',
+    recordTitle: '기록하는 것',
+    record: [
+      '질문하신 내용（문자로 변환한 것）',
+      '답변 가능 여부・선택하신 언어・날짜와 시각',
+      '어느 안내소에서 사용되었는지',
+      '체험 설문(〇△×)에 응답하신 경우 그 응답',
+    ],
+    keepTitle: '기록하지 않는 것',
+    keep: [
+      '목소리 자체',
+      '성함・연락처 등 개인을 알 수 있는 정보',
+      '현재 위치의 좌표（가까운 안내소를 고르는 데에만 사용합니다）',
+    ],
+    noteTitle: '양해 부탁드립니다',
+    note: [
+      '음성으로 질문하실 때는 받아쓰기를 위해 브라우저의 음성 인식 서비스'
+        + '（Chrome의 경우 Google）로 목소리가 전송됩니다.',
+      '질문 목록에 없는 질문은 문자로 변환한 내용을 외부 AI 서비스로 보내 답변을 만듭니다.',
+    ],
+    closing: '기록은 통계로만 다루며, 개인을 알 수 있는 형태로 공표하지 않습니다.',
+    agree: '동의하고 사용',
+    decline: '기록하지 않고 사용',
+    declineHint: '「기록하지 않고 사용」을 선택하셔도 안내는 모두 이용하실 수 있습니다.',
+  },
+
+  es: {
+    title: 'Guía IA de Shirakawa-go',
+    // 同意画面の上の大きな見出しに出す（何ができるかを、ひと目で伝える）
+    lead: 'Pregunte lo que quiera sobre Shirakawa-go, solo con la voz. Nuestra guía IA le responde.',
+    examples: ['🚻 ¿Dónde está el baño?', '🚌 Horarios de autobús', '🏔️ Cómo llegar al mirador', '🍜 Dónde comer'],
+    languages: '6 idiomas',
+    start: 'Pulse el botón de abajo y hable',
+    // スマートフォンで本文の代わりに出す要約（全文は「詳しく見る」で開く）
+    summary: [
+      'Registramos: su pregunta (en texto), el idioma, la fecha y hora, y sus respuestas a la encuesta',
+      'No registramos: su voz, su nombre ni su ubicación',
+      'Las preguntas que no están en nuestra lista se responden con una IA externa',
+    ],
+    locationNote: 'Para responder según la oficina de información más cercana, a continuación le pediremos usar su ubicación (no se registra)',
+    more: 'Ver detalles',
+    less: 'Ocultar detalles',
+    provider: 'Ofrecido por el Laboratorio Endo y Urata, Facultad de Informática y '
+      + 'Escuela de Posgrado en Informática, Universidad de Nagoya.',
+    purpose: 'Esta guía funciona como un proyecto de investigación para mejorar la '
+      + 'información turística. Sus registros de uso se utilizan únicamente para mejorar '
+      + 'la guía y para la investigación.',
+    recordTitle: 'Lo que registramos',
+    record: [
+      'El contenido de su pregunta (convertido en texto)',
+      'Si se pudo responder, el idioma elegido, la fecha y la hora',
+      'En qué oficina de información se utilizó',
+      'Su respuesta a la breve encuesta de experiencia (〇△×), si la responde',
+    ],
+    keepTitle: 'Lo que no registramos',
+    keep: [
+      'Su voz en sí misma',
+      'Su nombre, datos de contacto ni nada que permita identificarle',
+      'Su ubicación exacta (solo se usa para elegir la oficina más cercana)',
+    ],
+    noteTitle: 'Tenga en cuenta',
+    note: [
+      'Al hablar, su voz se envía al servicio de reconocimiento de voz de su navegador '
+        + '(Google, si usa Chrome) para transcribirla.',
+      'Si su pregunta no está en nuestra lista, el texto se envía a un servicio de IA '
+        + 'externo para redactar una respuesta.',
+    ],
+    closing: 'Los registros se tratan solo como estadísticas y nunca se publican de forma '
+      + 'que permita identificar a nadie.',
+    agree: 'Aceptar y continuar',
+    decline: 'Usar sin registro',
+    declineHint: 'Si elige «Usar sin registro», la guía sigue funcionando por completo.',
+  },
+
+  fr: {
+    title: 'Guide IA de Shirakawa-go',
+    // 同意画面の上の大きな見出しに出す（何ができるかを、ひと目で伝える）
+    lead: 'Posez vos questions sur Shirakawa-go, simplement à voix haute. Notre guide IA vous répond.',
+    examples: ['🚻 Où sont les toilettes ?', '🚌 Horaires des bus', '🏔️ Accès au belvédère', '🍜 Où manger'],
+    languages: '6 langues',
+    start: 'Appuyez sur le bouton ci-dessous et parlez',
+    // スマートフォンで本文の代わりに出す要約（全文は「詳しく見る」で開く）
+    summary: [
+      'Nous enregistrons : votre question (en texte), la langue, la date et l’heure, et vos réponses au sondage',
+      'Nous n’enregistrons pas : votre voix, votre nom ni votre position',
+      'Les questions absentes de notre liste reçoivent une réponse d’une IA externe',
+    ],
+    locationNote: 'Pour répondre selon le point d’information le plus proche, nous allons vous demander d’utiliser votre position (elle n’est pas enregistrée)',
+    more: 'Voir les détails',
+    less: 'Masquer les détails',
+    provider: 'Proposé par le laboratoire Endo et Urata, Faculté d’informatique et '
+      + 'École doctorale d’informatique, Université de Nagoya.',
+    purpose: 'Ce guide est exploité dans le cadre d’un projet de recherche visant à '
+      + 'améliorer l’information touristique. Vos données d’utilisation servent '
+      + 'uniquement à améliorer le guide et à la recherche.',
+    recordTitle: 'Ce que nous enregistrons',
+    record: [
+      'Le contenu de votre question (converti en texte)',
+      'Si une réponse a pu être donnée, la langue choisie, la date et l’heure',
+      'Le point d’information où le guide a été utilisé',
+      'Votre réponse au court sondage sur l’expérience (〇△×), si vous y répondez',
+    ],
+    keepTitle: 'Ce que nous n’enregistrons pas',
+    keep: [
+      'Votre voix elle-même',
+      'Votre nom, vos coordonnées ou tout élément permettant de vous identifier',
+      'Votre position exacte (utilisée uniquement pour choisir le point le plus proche)',
+    ],
+    noteTitle: 'À noter',
+    note: [
+      'Lorsque vous parlez, votre voix est envoyée au service de reconnaissance vocale '
+        + 'de votre navigateur (Google si vous utilisez Chrome) pour être transcrite.',
+      'Si votre question ne figure pas dans notre liste, le texte est envoyé à un service '
+        + 'd’IA externe afin de composer une réponse.',
+    ],
+    closing: 'Les données sont traitées uniquement sous forme de statistiques et ne sont '
+      + 'jamais publiées sous une forme permettant d’identifier quiconque.',
+    agree: 'Accepter et continuer',
+    decline: 'Utiliser sans enregistrement',
+    declineHint: 'Si vous choisissez « Utiliser sans enregistrement », '
+      + 'toutes les fonctions du guide restent disponibles.',
+  },
+};

@@ -1,0 +1,1228 @@
+// 画面と一連の流れの組み立て（lib/main.dart の移植）。
+//
+// 「押して話す → 音声認識 → FAQ検索 → 回答表示＆音声再生」の流れを
+// ブラウザ内で完結させる。各処理は差し替え可能な部品として分離してある。
+
+import {
+  LOG_FLUSH_INTERVAL_MS, CONSENT_IDLE_MS, KIOSK_REFRESH_MS, DAILY_RELOAD_HOURS,
+  VERSION_CHECK_MS, UPDATE_IDLE_MS, ATTRACT_STEP_MS, ATTRACT_LANG_MS, KIOSK_FIRST_LANG,
+} from './config.js';
+import { LANGUAGES, LABEL, uiString } from './app-language.js';
+import { FaqService } from './faq-service.js';
+import { FaqRepository } from './faq-repository.js';
+import { VoiceService, TTS_ONLY } from './voice-service.js';
+import { SpeechService } from './speech-service.js';
+import { AiService } from './ai-service.js';
+import { PlaceService, NOWHERE } from './place-service.js';
+import { BackgroundView } from './background.js';
+import { CharacterView, CharacterState, nameIn } from './character.js';
+import { talkKind, talkReply } from './talk.js';
+import { loadImage, retryRemote } from './assets.js';
+import { LayoutView } from './layout.js';
+import { AnswerView } from './answer-view.js';
+import { QuestionLog, logStats } from './question-log.js';
+import { SetupScreen } from './setup-screen.js';
+import { TunePanel } from './tune-panel.js';
+import { ConsentScreen, mayRecord } from './consent.js';
+import { SurveyView } from './survey.js';
+import { AttractMode } from './attract.js';
+import { NightMode, isNight } from './night.js';
+import { fixedPlace, isKiosk, isPreview, showSetup, showTune } from './deployment.js';
+
+// --- 部品（差し替え可能な単位） ---
+const speech = new SpeechService(); // 音声認識
+const faqService = new FaqService(); // FAQ検索
+const repo = new FaqRepository(); // FAQデータの取得
+const voice = new VoiceService(); // 読み上げ（音声ファイル／ブラウザ音声）
+const ai = new AiService(); // 質問回答集で答えられないときの補助
+const places = new PlaceService(); // いまどの案内所の近くにいるか
+const log = new QuestionLog(); // 質問の記録
+// かんたんなアンケート（〇△×）。答えは質問の記録とは別に送る
+const survey = new SurveyView(document.getElementById('survey'));
+survey.onVote = (vote) => log.addSurvey(vote, state.lang, state.place);
+
+const el = {
+  dataSource: document.getElementById('dataSource'),
+  dataVersion: document.getElementById('dataVersion'),
+  voiceCredit: document.getElementById('voiceCredit'),
+  dataStatus: document.getElementById('dataStatus'),
+  questionBubble: document.getElementById('questionBubble'),
+  talkButton: document.getElementById('talkButton'),
+  languages: document.getElementById('languages'),
+  placeButton: document.getElementById('placeButton'),
+  placeMenu: document.getElementById('placeMenu'),
+  placeMenuTitle: document.getElementById('placeMenuTitle'),
+  placeMenuList: document.getElementById('placeMenuList'),
+  placeMenuClose: document.getElementById('placeMenuClose'),
+  characterButton: document.getElementById('characterButton'),
+  characterMenu: document.getElementById('characterMenu'),
+  characterMenuTitle: document.getElementById('characterMenuTitle'),
+  characterMenuList: document.getElementById('characterMenuList'),
+  characterMenuClose: document.getElementById('characterMenuClose'),
+  faqStrip: document.getElementById('faqStrip'),
+  faqTrack: document.getElementById('faqTrack'),
+  answerPhoto: document.querySelector('.answer-photo'),
+  photoView: document.getElementById('photoView'),
+  photoViewImg: document.getElementById('photoViewImg'),
+  photoViewClose: document.getElementById('photoViewClose'),
+  typedForm: document.getElementById('typedForm'),
+  appTitle: document.getElementById('appTitle'),
+  typedInput: document.getElementById('typedInput'),
+  muteButton: document.getElementById('muteButton'),
+  typedSend: document.getElementById('typedSend'),
+};
+
+const background = new BackgroundView(document.getElementById('background'));
+const character = new CharacterView(
+  document.getElementById('character'), document.getElementById('stage'));
+const layout = new LayoutView(
+  document.querySelector('.screen'), document.getElementById('stage'));
+const answerView = new AnswerView(document.getElementById('answer'));
+const setupScreen = new SetupScreen(document.getElementById('setupScreen'), log, voice);
+const consentScreen = new ConsentScreen(document.getElementById('consentScreen'));
+const attract = new AttractMode(document.getElementById('attract'));
+const night = new NightMode(document.getElementById('night'));
+const tunePanel = new TunePanel(
+  document.getElementById('tunePanel'), character,
+  (lang) => changeLanguage(lang));
+
+// --- 画面の状態 ---
+const state = {
+  listening: false,
+  recognized: '',
+  answer: '',
+  photo: '',
+  link: '',
+  isFallback: false, // 翻訳未整備で日本語を表示中か
+  isAi: false, // AIが資料から作った回答を表示中か
+  lang: 'ja', // 選択中の言語
+  place: null, // いまいる案内所（null なら共通の回答だけを使う）
+  dataVersion: '',
+  dataSource: '',
+};
+
+// プレビュー版の印。本番と取り違えないよう、上のバーに出しておく。
+if (isPreview && el.appTitle) {
+  const badge = document.createElement('span');
+  badge.className = 'preview-badge';
+  badge.innerHTML = 'プレビュー<span class="preview-note">（記録されません）</span>';
+  badge.title = 'プレビュー版です。質問やアンケートは利用状況に記録されません。';
+  el.appTitle.after(badge);
+}
+
+/// 画面の右下のクレジット。次の2つを、あるものだけ並べて出す。
+///
+///   ・絵の作者（例：「イラスト制作：秀」）… いま立っているキャラクターに書いてあるとき。
+///     管理画面の「キャラクター」の「クレジット」から取る
+///   ・読み上げの音声（例：「音声：VOICEVOX:春日部つむぎ」）… 用意した音声
+///     （VOICEVOX で作ったもの）を鳴らすのは日本語の回答だけなので、日本語を選んでいて、
+///     その音声を使っているときだけ。名前と作り方は「読み上げの声」の名前と備考から取る
+function renderCredit() {
+  if (!el.voiceCredit) return;
+  const parts = [];
+
+  const illustration = (character.current?.credit ?? '').trim();
+  if (illustration) parts.push(illustration);
+
+  const sets = faqService.voiceSets ?? [];
+  const id = voice.currentSet;
+  const set = id === TTS_ONLY ? null : sets.find((s) => s.id === id) ?? null;
+  const label = (set?.label ?? '').trim();
+  if (state.lang === 'ja' && label !== '') {
+    const tool = /VOICEVOX/i.test(set.note ?? '') && !/VOICEVOX/i.test(label) ? 'VOICEVOX:' : '';
+    parts.push(`音声：${tool}${label}`);
+  }
+
+  el.voiceCredit.hidden = parts.length === 0;
+  el.voiceCredit.textContent = parts.join('　');
+}
+
+function render() {
+  renderPlacePill();
+  const title = uiString('appTitle', state.lang);
+  if (el.appTitle) el.appTitle.textContent = title;
+  document.title = isPreview ? `【プレビュー】${title}` : title;
+  el.dataSource.textContent = state.dataSource;
+  el.dataVersion.textContent = state.dataVersion;
+  renderCredit();
+
+  // 聞き取った質問（観光客側の発話）
+  const hasQuestion = state.recognized !== '';
+  el.questionBubble.hidden = !hasQuestion;
+  if (hasQuestion) {
+    el.questionBubble.textContent = `${uiString('question', state.lang)}: ${state.recognized}`;
+  }
+
+  answerView.update({
+    answer: state.answer,
+    photo: state.photo,
+    link: state.link,
+    lang: state.lang,
+    isFallback: state.isFallback,
+    isAi: state.isAi,
+    placeholder: uiString('prompt', state.lang),
+  });
+
+  el.talkButton.textContent = state.listening
+    ? uiString('listening', state.lang)
+    : uiString('pressToTalk', state.lang);
+  el.talkButton.classList.toggle('listening', state.listening);
+  el.talkButton.disabled = !speech.available;
+
+  el.typedInput.placeholder = uiString('typeInstead', state.lang);
+  el.typedSend.textContent = uiString('send', state.lang);
+
+  for (const button of el.languages.children) {
+    button.classList.toggle('selected', button.dataset.lang === state.lang);
+  }
+}
+
+function buildLanguageButtons() {
+  // 言語の切り替えは自動判定ではなく手動にしている。音声認識は
+  // 「これから何語が話されるか」を先に指定する必要があるため。
+  // 騒音下では自動判定が誤りやすく、観光客が自分で選ぶ方が確実。
+  el.languages.innerHTML = '';
+  for (const lang of LANGUAGES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'lang-button';
+    button.dataset.lang = lang;
+    button.textContent = LABEL[lang];
+    button.addEventListener('click', () => changeLanguage(lang));
+    el.languages.appendChild(button);
+  }
+}
+
+/// 現在地の表示。押すと選び直せる。
+///
+/// 観光客のスマートフォンでは、開いた瞬間に位置情報を求めると驚かせるため、
+/// すでに許可されている場合だけ自動で調べ、そうでなければ
+/// この表示を押したときに求める。
+function renderPlacePill() {
+  if (!el.placeButton || isKiosk) return; // 据え置きは場所を固定しているので出さない
+  const how = places.how;
+  let label;
+  if (how === 'checking') {
+    label = uiString('placeChecking', state.lang);
+  } else if (state.place) {
+    label = `📍 ${places.labelFor(state.place, state.lang)}`;
+  } else if (how === 'manual' || how === 'far') {
+    label = `📍 ${uiString('placeFar', state.lang)}`;
+  } else {
+    label = `📍 ${uiString('placeUnset', state.lang)}`;
+  }
+  el.placeButton.textContent = label;
+}
+
+function openPlaceMenu() {
+  el.placeMenuTitle.textContent = uiString('placeTitle', state.lang);
+  el.placeMenuClose.textContent = uiString('close', state.lang);
+  el.placeMenuList.innerHTML = '';
+
+  const choices = [
+    { value: 'auto', label: uiString('placeAuto', state.lang) },
+    // 選んだ結果は日本語の名前で覚える（FAQとの突き合わせに使うため）が、
+    // 画面に出すのはその言語の名前にする
+    ...places.names.map((name) => ({
+      value: name,
+      label: places.labelFor(name, state.lang),
+    })),
+    { value: NOWHERE, label: uiString('placeNone', state.lang) },
+  ];
+  const saved = places.saved || 'auto';
+
+  for (const choice of choices) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = choice.label;
+    if (choice.value === saved) button.classList.add('selected');
+    button.addEventListener('click', () => choosePlace(choice.value));
+    el.placeMenuList.appendChild(button);
+  }
+
+  const hint = document.createElement('p');
+  hint.className = 'hint-line';
+  hint.textContent = uiString('placeHint', state.lang);
+  el.placeMenuList.appendChild(hint);
+
+  el.placeMenu.hidden = false;
+}
+
+/// 音を出す／消すボタン。観光客のスマートフォンだけに出す。
+/// 据え置きは次々と別の方が使うので、だれかが消したままにすると次の方に声が届かない。
+function renderMuteButton() {
+  if (!el.muteButton) return;
+  el.muteButton.hidden = isKiosk;
+  if (isKiosk) return;
+  const muted = voice.muted;
+  el.muteButton.textContent = muted ? '🔇' : '🔊';
+  el.muteButton.classList.toggle('muted', muted);
+  // 押すと何が起きるかを読み上げ・ツールチップで伝える
+  const label = uiString(muted ? 'muteOff' : 'muteOn', state.lang);
+  el.muteButton.setAttribute('aria-label', label);
+  el.muteButton.title = label;
+  el.muteButton.setAttribute('aria-pressed', muted ? 'true' : 'false');
+}
+
+function wireMute() {
+  if (!el.muteButton || isKiosk) return;
+  el.muteButton.addEventListener('click', async () => {
+    await voice.setMuted(!voice.muted);
+    if (voice.muted) character.setState(CharacterState.idle);
+    renderMuteButton();
+  });
+  renderMuteButton();
+}
+
+function renderCharacterPill() {
+  if (!el.characterButton) return;
+  el.characterButton.textContent = `🧑 ${nameIn(character.current, state.lang)}`;
+  renderCredit();   // キャラクターが変わったら、絵のクレジットも入れ替える
+}
+
+function openCharacterMenu() {
+  el.characterMenuTitle.textContent = uiString('characterTitle', state.lang);
+  el.characterMenuClose.textContent = uiString('close', state.lang);
+  el.characterMenuList.innerHTML = '';
+
+  for (const item of character.list) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'char-choice';
+    if (item.id === character.current.id) button.classList.add('selected');
+
+    // 絵を見せないと選べない（名前だけでは、どれが誰か分からない）
+    const img = document.createElement('img');
+    img.addEventListener('error', () => retryRemote(img));   // ロリポップに無ければ GitHub から
+    loadImage(img, `character/${item.idle}`);
+    img.alt = '';
+    img.loading = 'lazy';
+    const label = document.createElement('span');
+    label.textContent = nameIn(item, state.lang);
+    button.append(img, label);
+
+    button.addEventListener('click', () => {
+      character.choose(item.id, true);
+      renderCharacterPill();
+      el.characterMenu.hidden = true;
+      // 選んだ人がすぐ分かるよう、その場で喋っている表情にはしない
+      character.setState(CharacterState.idle);
+      background.draw();
+    });
+    el.characterMenuList.appendChild(button);
+  }
+
+  el.characterMenu.hidden = false;
+}
+
+function wireCharacter() {
+  if (!el.characterButton || !el.characterMenu) return;
+  renderCharacterPill();
+  el.characterButton.addEventListener('click', openCharacterMenu);
+  el.characterMenuClose.addEventListener('click', () => {
+    el.characterMenu.hidden = true;
+  });
+  // 外側を押しても閉じる
+  el.characterMenu.addEventListener('click', (e) => {
+    if (e.target === el.characterMenu) el.characterMenu.hidden = true;
+  });
+}
+
+async function choosePlace(value) {
+  el.placeMenu.hidden = true;
+
+  if (value === 'auto') {
+    places.remember('');
+    places.how = 'checking';
+    renderPlacePill();
+    await places.resolve({ ask: true }); // ここで初めて位置情報を求める
+  } else {
+    places.remember(value);
+  }
+
+  state.place = places.current;
+  buildChips();
+  render();
+  console.info('現在地:', state.place ?? '（共通のみ）');
+}
+
+/// 歩いて移動している人のために、現在地が古ければ静かに取り直す。
+/// 結果が変わったときだけ画面を更新する。
+async function refreshPlace() {
+  const changed = await places.refreshIfStale();
+  if (!changed) return;
+  state.place = places.current;
+  renderPlacePill();
+  buildChips();
+  render();
+  console.info('現在地が変わりました:', state.place ?? '（共通のみ）');
+}
+
+function wirePlace() {
+  if (!el.placeButton || !el.placeMenu) {
+    console.warn('現在地の表示が見つかりません（画面の更新が古い可能性があります）');
+    return;
+  }
+
+  // 据え置き端末は場所が動かない。
+  // 観光客が押して変えられると、その案内所と違う回答が出てしまう。
+  if (isKiosk) {
+    el.placeButton.hidden = true;
+    return;
+  }
+
+  el.placeButton.addEventListener('click', openPlaceMenu);
+
+  // 画面に戻ってきたとき（別のアプリから戻ったときなど）に取り直す
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshPlace();
+  });
+  el.placeMenuClose.addEventListener('click', () => {
+    el.placeMenu.hidden = true;
+  });
+  // 外側を押しても閉じる
+  el.placeMenu.addEventListener('click', (e) => {
+    if (e.target === el.placeMenu) el.placeMenu.hidden = true;
+  });
+}
+
+/// よくある質問（押すだけで聞ける入口）。
+///
+/// 並べるものは、質問回答集のExcelで「よくある質問」に文言を入れた項目。
+/// 職員がそこを直せば、この列も変わる。
+///
+/// 並び順は、その端末でよく聞かれた順を先にする（記録が無ければExcelの順）。
+/// 日本語以外では、その言語の質問例に置き換える。
+function chipLabel(faq) {
+  if (state.lang === 'ja') return faq.chip;
+  return (faqService.questionsFor(faq, state.lang)[0] ?? faq.chip).trim();
+}
+
+function buildChips() {
+  const asked = Object.keys(logStats(log.readAll()).topMatched);
+  const all = faqService.all.filter(
+    (f) => f.chip && (!f.place || f.place === '共通' || f.place === state.place),
+  );
+  const byId = new Map(all.map((f) => [f.id, f]));
+
+  const picked = [];
+  for (const id of asked) {
+    const faq = byId.get(id);
+    if (faq) picked.push(faq);
+  }
+  for (const faq of all) {
+    if (!picked.includes(faq)) picked.push(faq);
+  }
+
+  // 同じ文言が場所ごとの項目と共通版で重なることがあるので、1つにまとめる
+  const chips = [];
+  for (const faq of picked) {
+    const text = chipLabel(faq);
+    if (text !== '' && !chips.includes(text)) chips.push(text);
+  }
+
+  el.faqTrack.innerHTML = '';
+  if (chips.length === 0) {
+    el.faqStrip.hidden = true;
+    return;
+  }
+  el.faqStrip.hidden = false;
+
+  // 同じ並びを2回置き、端まで流れたら先頭に戻しても途切れないようにする
+  for (let pass = 0; pass < 2; pass++) {
+    for (const text of chips) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'chip';
+      button.textContent = text;
+      if (pass === 1) button.setAttribute('aria-hidden', 'true');
+      button.addEventListener('click', () => askChip(text));
+      el.faqTrack.appendChild(button);
+    }
+  }
+  // 数が多いほどゆっくり流す（読み取れる速さを保つ）
+  el.faqTrack.style.setProperty('--marquee-duration', `${Math.max(24, chips.length * 4)}s`);
+}
+
+/// よくある質問を押したとき。声で聞いたときと同じ流れにする。
+async function askChip(text) {
+  speech.stop(true);
+  await voice.stop();
+  handleQuestion(text);
+}
+
+/// 言語ボタンが押されたときの処理
+async function changeLanguage(lang) {
+  if (lang === state.lang) return;
+  speech.stop(true); // 聞き取り中なら、その内容は前の言語のものなので捨てる
+  await voice.stop();
+  await voice.setLanguage(lang);
+  state.lang = lang;
+  state.listening = false;
+  state.recognized = '';
+  state.answer = '';
+  state.photo = '';
+  state.link = '';
+  state.isFallback = false;
+  state.isAi = false;
+  character.setState(CharacterState.idle);
+  renderPlacePill(); // 表示をその言語にする
+  renderCharacterPill();
+  renderMuteButton();
+  survey.setLanguage(lang);
+  buildChips(); // その言語の言い方に入れ替える
+  render();
+  console.info('言語を切り替え:', LABEL[lang]);
+}
+
+/// ボタンを押すたびに開始と終了を切り替える。
+/// 押し続ける方式だと、指が少し離れただけで録音が切れてしまうため。
+async function toggleListening() {
+  if (state.listening) {
+    speech.stop();
+    return;
+  }
+  if (!speech.available) return;
+
+  await voice.stop(); // 読み上げ中なら止めて質問を優先する
+  state.listening = true;
+  state.recognized = '';
+  state.answer = '';
+  state.photo = '';
+  state.link = '';
+  state.isFallback = false;
+  state.isAi = false;
+  character.setState(CharacterState.listening);
+  render();
+  speech.start(state.lang);
+}
+
+/// 認識した質問をFAQ検索にかけ、表示と読み上げを行う
+async function handleQuestion(question) {
+  state.listening = false;
+
+  // 何も聞き取れていない場合は、案内も記録もせずに待機に戻す
+  if (!question || question.trim() === '') {
+    character.setState(CharacterState.idle);
+    render();
+    return;
+  }
+
+  state.recognized = question;
+
+  // あいさつなどの会話は、質問回答集より先に見る。
+  // 「好きな食べ物は？」が食事の案内に当たってしまわないように。
+  // 会話とみなすのは、言い方とほぼ同じ短い文のときだけなので、質問は奪わない。
+  if (await answerTalk(question)) return;
+
+  const faq = faqService.search(question, state.lang, state.place);
+
+  // 次の質問に備えて、現在地が古ければ裏で取り直す（この回答は待たせない）
+  refreshPlace();
+
+  if (faq == null) {
+    await answerWithoutFaq(question);
+    return;
+  }
+
+  const localized = faqService.answerFor(faq, state.lang);
+  state.answer = localized.text;
+  state.isAi = false;
+  state.photo = faq.photo;
+  state.link = faq.link;
+  state.isFallback = localized.isFallback;
+  character.setState(CharacterState.talking);
+  render();
+
+  // 音声ファイルがあればそれを、無ければブラウザ音声で読み上げる
+  const mode = await voice.speak(faq, state.lang, localized);
+  const note = localized.isFallback ? ' (日本語で代替)' : '';
+  console.info(`読み上げ方法: ${mode} / 言語: ${LABEL[state.lang]}${note}`);
+
+  log.add({
+    at: new Date(),
+    lang: state.lang,
+    recognized: question,
+    faqId: faq.id,
+    category: faq.category,
+    translationFallback: localized.isFallback,
+    voiceMode: mode,
+    place: state.place,
+    source: 'faq',
+  });
+  askSurvey();
+}
+
+/// 案内を1つ終えたあとに、アンケートを出す（その方にまだ聞いていなければ）。
+/// 「記録せずに使う」を選んだ方には出さない（答えを記録できないため）。
+/// あいさつなどの会話のあとには出さない（まだ案内を受けていないため）。
+function askSurvey() {
+  if (mayRecord()) survey.ask(state.lang);
+}
+
+/// 「こんにちは」「ありがとう」などへの返事。答えたら true。
+///
+/// 返事は立っているキャラクターのもの（管理画面の「キャラクター」で書く）。
+/// 記録には faq_id「talk:種類」で残す（利用状況で、案内とは分けて数えられるように）。
+async function answerTalk(question) {
+  const kind = talkKind(question, character.current);
+  if (!kind) return false;
+  const reply = talkReply(character.current, kind, state.lang);
+  if (!reply) return false;
+
+  state.answer = reply;
+  state.photo = '';
+  state.link = '';
+  state.isFallback = false;
+  state.isAi = false;
+  character.setState(CharacterState.talking);
+  render();
+  const mode = await voice.speakText(reply);
+  log.add({
+    at: new Date(),
+    lang: state.lang,
+    recognized: question,
+    faqId: `talk:${kind}`,
+    category: 'talk',
+    translationFallback: false,
+    voiceMode: mode,
+    place: state.place,
+    source: 'faq',
+  });
+  return true;
+}
+
+/// 質問回答集で答えられなかったときの流れ。
+///
+/// AIの中継が設定されていれば、案内資料をもとにした回答を試みる。
+/// 答えが得られなければ、これまでどおり職員へ案内する。
+/// 待たせないことを優先し、時間切れ・通信断はすべて職員案内に倒す。
+async function answerWithoutFaq(question) {
+  let result = null;
+
+  if (ai.available) {
+    state.answer = uiString('aiThinking', state.lang);
+    state.photo = '';
+    state.link = '';
+    state.isFallback = false;
+    state.isAi = false;
+    character.setState(CharacterState.listening);
+    render();
+
+    // キャラクターの名前も送る（雑談なら、そのキャラクターとして返事をしてもらうため）
+    result = await ai.ask(question, state.lang, state.place,
+      nameIn(character.current, state.lang));
+  }
+
+  if (result) {
+    state.answer = result.answer;
+    // 案内には「資料をもとにAIが作成した回答」と断りを出す。
+    // 雑談の返事（result.talk）は案内ではないので出さない。
+    state.isAi = !result.talk;
+    character.setState(CharacterState.talking);
+    render();
+
+    const mode = await voice.speakText(result.answer);
+    console.info('AIが回答（根拠）:', result.sources.join(', ') || (result.talk ? '雑談' : 'なし'));
+    log.add({
+      at: new Date(),
+      lang: state.lang,
+      recognized: question,
+      // 雑談は案内の数に入れず、会話として数える（利用状況で「（会話）AIが返事」）
+      faqId: result.talk ? 'talk:ai' : null,
+      category: result.talk ? 'talk' : '',
+      translationFallback: false,
+      voiceMode: mode,
+      place: state.place,
+      source: result.talk ? 'faq' : 'ai',
+    });
+    if (!result.talk) askSurvey();
+    return;
+  }
+
+  // 該当なし＝ガードレール発動、職員へ誘導
+  const fallback = uiString('staffReferral', state.lang);
+  state.answer = fallback;
+  state.photo = '';
+  state.link = '';
+  state.isFallback = false;
+  state.isAi = false;
+  character.setState(CharacterState.talking);
+  render();
+
+  // 画面が見えない方にも伝わるよう、この案内も読み上げる
+  const mode = await voice.speakText(fallback);
+  // 答えられなかった質問こそ、FAQ拡充の材料になる
+  log.add({
+    at: new Date(),
+    lang: state.lang,
+    recognized: question,
+    faqId: null,
+    category: '',
+    translationFallback: false,
+    voiceMode: mode,
+    place: state.place,
+    source: 'none',
+  });
+  askSurvey();
+}
+
+function wireSpeech() {
+  speech.onPartial = (text) => {
+    state.recognized = text;
+    render();
+  };
+  speech.onStop = () => {
+    // 無音が続いて自動終了した場合も、ボタンの表示を戻す
+    state.listening = false;
+    render();
+  };
+  speech.onResult = (text) => {
+    handleQuestion(text);
+  };
+  speech.onError = (kind) => {
+    state.listening = false;
+    character.setState(CharacterState.idle);
+    state.answer = uiString(kind === 'denied' ? 'micDenied' : 'speechUnavailable', state.lang);
+    render();
+  };
+}
+
+/// 写真を押したら大きく表示する。
+/// 案内図のように細かい写真は、小さいままでは読めないため。
+function wirePhoto() {
+  if (!el.answerPhoto || !el.photoView) return;
+
+  const close = () => {
+    el.photoView.hidden = true;
+    el.photoViewImg.removeAttribute('src');
+  };
+
+  el.answerPhoto.addEventListener('click', () => {
+    if (!el.answerPhoto.getAttribute('src')) return;
+    el.photoViewImg.src = el.answerPhoto.src;
+    el.photoViewClose.textContent = uiString('close', state.lang);
+    el.photoView.hidden = false;
+  });
+  el.photoViewClose.addEventListener('click', close);
+  // 写真の外側を押しても閉じる
+  el.photoView.addEventListener('click', (e) => {
+    if (e.target !== el.photoViewImg) close();
+  });
+}
+
+function wireInput() {
+  el.talkButton.addEventListener('click', toggleListening);
+
+  // 音声が使えないブラウザでも案内が止まらないよう、入力欄を出す
+  el.typedForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = el.typedInput.value.trim();
+    if (text === '') return;
+    el.typedInput.value = '';
+    handleQuestion(text);
+  });
+
+  // 以前はここを長押しすると職員用の画面が開いたが、
+  // 観光客が触る端末では、隠した導線もいずれ見つかる。
+  // 設定画面は URL に ?setup=1 を足したときだけ開く。
+}
+
+/// 質問回答集に入っている設定を、画面と声に当てる。
+/// 起動時と、新しい質問回答集を受け取ったときの両方で呼ぶ。
+function applySettings() {
+  // 用意した音声の一覧（話者ごと）と、言語ごとの読み上げの設定を渡す
+  voice.setSets(faqService.voiceSets);
+  voice.setSettings(faqService.voiceSettings);
+  voice.setReadings(faqService.readings);
+
+  // 設置形態ごとの画面の形。立ち絵より先に当てる
+  // （立ち絵の大きさは、この倍率を掛けて決まるため）。
+  layout.setList(faqService.layouts);
+
+  // 立つキャラクターの一覧。職員が決めた既定を立て、利用者は選び直せる。
+  character.setList(faqService.characters);
+  renderCharacterPill();
+}
+
+/// いま使っている質問回答集のコミット（version.php で知ったもの）。'' なら分からない。
+let appliedRef = '';
+/// 最後に質問回答集そのものを取りに行った時刻
+let lastFullFetch = 0;
+
+/// 新しい質問回答集があれば入れ替える。
+///
+/// まず version.php に「管理画面で最後に反映したコミット」を聞く（小さな問い合わせ）。
+///   ・新しいコミットなら、そのコミットを指定して取りに行く（古い写しが返らない）
+///   ・同じなら、何もしない
+///   ・聞けないとき（version.php が無い等）は、full が true のときだけ取りに行く
+async function refreshInBackground({ full = true } = {}) {
+  const ref = await repo.latestRef();
+  if (ref && ref === appliedRef) return;
+  if (!ref && !full) return;
+  lastFullFetch = Date.now();
+  const remote = await repo.fetchRemote(ref);
+  if (remote == null) return;
+  if (ref) appliedRef = ref;
+  if (remote.version === state.dataVersion) {
+    console.info(`FAQは最新です（${remote.version}）`);
+    return;
+  }
+  if (faqService.loadFromJson(remote.json)) {
+    state.dataVersion = remote.version;
+    state.dataSource = remote.sourceLabel;
+    // 質問と回答だけでなく、管理画面で決めた設定（画面の形・キャラクター・声）も当て直す。
+    // 以前は起動時にしか当てていなかったため、新しい設定は「もう一度開き直したとき」に
+    // やっと出ていた（1回目は前回の写しの設定のまま）。
+    applySettings();
+    buildChips();   // よくある質問の札も、新しい質問回答集で作り直す
+    render();
+    console.info(`FAQを更新しました: ${faqService.count}件 (${remote.version})`);
+  }
+}
+
+async function init() {
+  buildLanguageButtons();
+  wireSpeech();
+  wireInput();
+  wirePhoto();
+  render();
+
+  // 読み上げ終了で待機表情に戻す
+  voice.onComplete = () => character.setState(CharacterState.idle);
+  await voice.init();
+
+  // 1. まずローカル（キャッシュ→同梱）を読む。通信を待たずにすぐ使える。
+  try {
+    const local = await repo.loadLocal();
+    faqService.loadFromJson(local.json);
+    state.dataVersion = local.version;
+    state.dataSource = local.sourceLabel;
+    console.info(`FAQ読み込み: ${faqService.count}件 (${local.sourceLabel} / ${local.version})`);
+  } catch (e) {
+    console.error('FAQデータを読み込めません:', e);
+    state.dataSource = '読込エラー';
+  }
+
+  applySettings();
+  wireCharacter();
+  wireMute();
+
+  // 現在地の判定（案内所の一覧は質問回答集に入っている）
+  // ここで失敗しても、案内そのものは続けられるようにする
+  try {
+    places.setPlaces(faqService.places);
+    wirePlace();
+    renderPlacePill();
+
+    if (isKiosk) {
+      // 据え置き端末は場所が動かないので、位置情報を使わずURLの指定に従う。
+      // 観光客に位置情報の許可を求めずに済む。
+      places.remember(fixedPlace);
+      state.place = places.current;
+      renderPlacePill();
+    } else {
+      // 位置情報の取得は時間がかかることがあるので、待たずに画面を使える状態にする
+      places.resolve().then(() => {
+        state.place = places.current;
+        renderPlacePill();
+        buildChips();
+        render();
+      });
+    }
+  } catch (e) {
+    console.error('現在地の準備に失敗しました:', e);
+  }
+
+  // よくある質問を並べる（FAQを読み込んだ後でないと作れない）
+  buildChips();
+
+  // 2. 音声が使えないブラウザでは、文字で聞けることを伝える
+  //    （入力欄は常に出しているので、案内を出すだけでよい）
+  if (!speech.available) {
+    state.answer = uiString('speechUnsupported', state.lang);
+  }
+  render();
+
+  // 3. 裏で最新データを取りに行く。失敗しても表示中のデータで動き続ける。
+  refreshInBackground();
+
+  // 4. 溜まっている質問の記録を送る。失敗しても案内は止めない。
+  startLogSending();
+
+  // 5. 職員が ?setup=1 を付けて開いたときだけ、設定画面を出す
+  if (showSetup) setupScreen.open();
+
+  // 6. ?tune=1 なら、見え方を合わせる画面を出す
+  if (showTune) {
+    // 文章が長いときの伸び方も見られるようにしておく
+    tunePanel.onLongText = showLongSample;
+    tunePanel.open();
+  }
+
+  // 6. 記録することをお伝えし、同意をいただく
+  wireConsent();
+}
+
+/// 端末（ブラウザ）の言語のうち、案内できるもの。無ければ英語。
+function browserLanguage() {
+  const prefs = navigator.languages?.length ? navigator.languages : [navigator.language || ''];
+  for (const tag of prefs) {
+    const code = String(tag).toLowerCase().split('-')[0];
+    if (LANGUAGES.includes(code)) return code;
+  }
+  return 'en';
+}
+
+/// 使い始める前に、記録することをお伝えする。
+///
+/// 観光客の端末は初回だけ。据え置き端末は、しばらく誰も触っていなければまた出す。
+/// 据え置きは次々と別の方が使うので、一度の同意で済ませるわけにいかない。
+function wireConsent() {
+  // 同意画面で言語を選べる。選んだ言語はそのまま案内にも引き継ぐ。
+  consentScreen.onLanguage = (lang) => changeLanguage(lang);
+
+  const ask = (first) => {
+    if (consentScreen.open) return;
+    voice.stop();
+    // 上の見出しの横に、いま立っているキャラクターを出す
+    consentScreen.image = document.querySelector('.character-img')?.src ?? '';
+    // 据え置きは、待ち受けで触れられたときの言語のまま出す（その言語を見て触れた方なので）
+    const lang = first ?? state.lang;
+    consentScreen.asksLocation = !isKiosk && !places.saved;
+    consentScreen.ask(lang, () => {
+      // 断られた場合もここへ来る（案内はそのまま使える）
+      touch();
+      // 観光客の端末は、ここで現在地をたずねる（近くの案内所の答えを出すため）。
+      // 以前は上の「📍 現在地を選ぶ」を押したときだけたずねていたが、押す方がほとんどおらず、
+      // 案内所ごとの答え（ロッカー・ATMなど）が出ていなかった。
+      // ボタンを押した流れの中でたずねるので、開いた瞬間に許可を求めて驚かせることもない。
+      // 記録するかどうかとは関係ないので、どちらのボタンでもたずねる（現在地は記録しない）。
+      // 職員や利用者が案内所を選んでいる端末では、その選択を優先してたずねない。
+      if (!isKiosk && !places.saved) choosePlace('auto');
+    });
+  };
+
+  if (isKiosk) {
+    // 待ち受けで触れられたら、前の実演を消して同意画面を出す
+    // 言語のボタンの所に触れたときは、その言語で出す
+    attract.onTouch = (lang) => {
+      touch();
+      resetForNextVisitor();
+      if (lang && lang !== state.lang) changeLanguage(lang);
+      ask(lang || undefined);
+    };
+    attract.onStep = demoStep;
+    attract.anchor = el.talkButton ?? document.getElementById('talkButton');
+    attract.stepMs = ATTRACT_STEP_MS;
+    startIdleWatch();
+    startKioskUpkeep();
+    if (showSetup) {
+      // 職員が設定画面（?setup=1）を開いて起動したときは、待ち受けを後回しにする。
+      // 待ち受けは設定画面より前に出るので、先に出すと設定のボタンが押せない。
+      setupScreen.onClose = () => { startAttract(); checkNight(); };
+    } else {
+      startAttract();   // 起動直後は、次に来た方のために待ち受けにしておく
+      checkNight();     // 夜に開き直したとき（3時など）は、すぐ真っ黒に戻す
+    }
+    setInterval(checkNight, 30 * 1000);
+  } else {
+    // 観光客の端末は、その端末の言語で始める（日本語の端末なら日本語、
+    // 案内できない言語なら英語）。開くたびに日本語から始まると、海外の方が戸惑う。
+    const want = browserLanguage();
+    if (want !== state.lang) changeLanguage(want);
+    // 観光客の端末でも、開くたびに出す。
+    // 以前は一度お答えいただいた端末では出さなかったが、同じ端末を家族や
+    // 連れの方が使うこともあり、使う方ごとに確かめた方がよいため。
+    ask(want);
+  }
+}
+
+/// 据え置き端末の待ち受けを始める（だれも使っていないとき）。
+///
+/// 同意画面ではなく、ふだんの案内画面のまま受け答えの実演を流す。
+/// 何ができるかが見て分かり、触れたときに初めて同意画面を出す。
+function startAttract() {
+  if (night.on) return;   // 夜間は真っ黒のまま
+  if (consentScreen.open) consentScreen.close();
+  speech.stop(true);
+  voice.stop();
+  resetForNextVisitor();
+  attract.setLanguage(state.lang);
+  attract.start();
+}
+
+/// いまの案内所の消灯・点灯の時刻（管理画面の「画面レイアウト」）
+function nightHours() {
+  return (faqService.layouts ?? []).find((l) => l.place === fixedPlace)?.night ?? null;
+}
+
+/// 消灯の時刻になったら画面を真っ黒にし、点灯の時刻になったら待ち受けに戻す。
+///
+/// 夜に画面が明るいと、虫（カメムシなど）が集まってくる。
+/// 電源を切ると朝に立ち上げ直す手間がかかるので、画面を黒くするだけにする。
+/// 職員が設定画面（?setup=1）を開いているときは消さない。
+function checkNight() {
+  if (!isKiosk || showSetup) return;
+  const hours = nightHours();
+  const dark = isNight(hours);
+  if (dark && !night.on) {
+    attract.stop();
+    if (consentScreen.open) consentScreen.close();
+    speech.stop(true);
+    voice.stop();
+    resetForNextVisitor();
+    // 夜に触れたときの一言は、日本語と英語で出す（待ち受けで流れていた言語に左右されないように）
+    night.enter('ja', hours.on);
+    console.info(`夜間：画面を消しました（${hours.on} に点けます）`);
+  } else if (!dark && night.on) {
+    night.leave();
+    startAttract();
+    console.info('夜間が終わりました。待ち受けに戻します');
+  }
+}
+
+/// 待ち受けで見せる受け答え（よくある質問のうち、この案内所で使うもの）
+/// 長い答えは吹き出しからあふれて読み切れないので、短めのものを選ぶ。
+function demoFaqs() {
+  const usable = faqService.all.filter(
+    (f) => f.chip && (!f.place || f.place === '共通' || f.place === state.place),
+  );
+  const short = usable.filter((f) => faqService.answerFor(f, state.lang).text.length <= DEMO_MAX_CHARS[state.lang]);
+  return short.length >= 3 ? short : usable;
+}
+
+/// 実演に使う答えの長さの上限（言語ごと。日本語・中国語は1文字が大きいので短く）
+const DEMO_MAX_CHARS = { ja: 70, zh: 70, ko: 110, en: 170, es: 190, fr: 190 };
+
+/// 待ち受けの1こま。質問を出し、少し置いて答えを出す（音は出さない）。
+/// 言語は ATTRACT_LANG_MS ごとに、英語から順に切り替える。
+async function demoStep(n) {
+  const order = [KIOSK_FIRST_LANG, ...LANGUAGES.filter((l) => l !== KIOSK_FIRST_LANG)];
+  const perLang = Math.max(1, Math.round(ATTRACT_LANG_MS / ATTRACT_STEP_MS));
+  const lang = order[Math.floor(n / perLang) % order.length];
+  if (lang !== state.lang) await changeLanguage(lang);
+  if (!attract.running) return;
+  attract.setLanguage(lang);
+
+  const faqs = demoFaqs();
+  if (faqs.length === 0) return;
+  const faq = faqs[n % faqs.length];
+  state.recognized = chipLabel(faq);
+  state.answer = '';
+  state.photo = '';
+  state.link = '';
+  state.isAi = false;
+  state.isFallback = false;
+  character.setState(CharacterState.listening);
+  render();
+
+  setTimeout(() => {
+    if (!attract.running) return;
+    const localized = faqService.answerFor(faq, state.lang);
+    state.answer = localized.text;
+    state.isFallback = localized.isFallback;
+    state.photo = faq.photo || '';
+    character.setState(CharacterState.talking);
+    render();
+    setTimeout(() => {
+      if (attract.running) character.setState(CharacterState.idle);
+    }, Math.min(4000, ATTRACT_STEP_MS - 2500));
+  }, 1500);
+}
+
+/// 据え置き端末で、無操作が続いたら待ち受けに戻す。
+let lastTouch = Date.now();
+
+function touch() {
+  lastTouch = Date.now();
+}
+
+function startIdleWatch() {
+  for (const ev of ['pointerdown', 'keydown']) {
+    window.addEventListener(ev, touch, { passive: true });
+  }
+  setInterval(() => {
+    if (attract.running || night.on || showSetup) {
+      touch();
+      return;
+    }
+    // 使っている途中でも、同意画面のまま離れた場合でも、しばらく触られなければ待ち受けへ
+    if (Date.now() - lastTouch >= CONSENT_IDLE_MS) {
+      startAttract();
+      // 次の方を待つ間に、新しい内容があれば入れておく
+      refreshInBackground();
+    }
+  }, 10000);
+}
+
+/// 据え置き端末の手入れ。職員が毎晩開き直さなくて済むようにする。
+///
+///   1. 管理画面で「反映」した内容を、だれも使っていないときに入れ替える。
+///      ・1分ごとに version.php に反映の有無を聞く（反映から1〜2分で届く）
+///      ・5分ごとに質問回答集そのものも確かめる（version.php が使えないときの受け皿）
+///      使っている方がいる間は入れ替えない（読んでいる途中で画面が変わらないように）。
+///   2. 1日に1回、夜中に画面を開き直す。案内アプリそのもの（js・css）を
+///      新しくしたときは、開き直さないと読み込まれないため。
+const RELOADED_KEY = 'shirakawa_reloaded_on';
+
+function startKioskUpkeep() {
+  setInterval(() => {
+    const idle = attract.running || night.on || Date.now() - lastTouch >= UPDATE_IDLE_MS;
+    if (!idle || showSetup) return;
+    refreshInBackground({ full: Date.now() - lastFullFetch >= KIOSK_REFRESH_MS });
+  }, VERSION_CHECK_MS);
+
+  setInterval(async () => {
+    const now = new Date();
+    if (!DAILY_RELOAD_HOURS.includes(now.getHours())) return;
+    // 使っている方がいるとき、職員が設定画面を開いているときは開き直さない
+    if (!(attract.running || night.on) || showSetup) return;
+    // 「その日のその時刻」で覚える（3時に開き直しても、12時にもう一度開き直せるように）
+    const today = `${now.toDateString()} ${now.getHours()}`;
+    if (readStore(RELOADED_KEY) === today) return;   // 開き直した直後に、また開き直さない
+    // 通信できないときに開き直すと、エラーの画面のまま止まってしまう。先に確かめる
+    try {
+      const res = await fetch(window.location.href, { cache: 'no-store' });
+      if (!res.ok) return;
+    } catch (_) {
+      return;
+    }
+    // 開き直した日を覚えられない端末では開き直さない（その1時間、開き直し続けてしまう）
+    writeStore(RELOADED_KEY, today);
+    if (readStore(RELOADED_KEY) !== today) return;
+    window.location.reload();
+  }, 60 * 1000);
+}
+
+function readStore(key) {
+  try {
+    return localStorage.getItem(key) || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function writeStore(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (_) {
+    // 書けなくても案内は続ける（開き直しだけをやめる）
+  }
+}
+
+/// 次の方のために、画面を最初の状態へ戻す。
+/// 前の方の質問と回答が残っていると、その方の質問が他人に見えてしまう。
+function resetForNextVisitor() {
+  survey.reset();   // 次の方にも、アンケートを聞けるようにする
+  state.recognized = '';
+  state.answer = '';
+  state.photo = '';
+  state.link = '';
+  state.isAi = false;
+  state.isFallback = false;
+  character.setState(CharacterState.idle);
+  render();
+}
+
+/// 吹き出しが長文でどう伸びるかを見るための試し表示（調整画面から使う）。
+/// 短い文だけで合わせると、本番の長い回答で顔にかぶることがある。
+function showLongSample() {
+  const faq = faqService.all.find((f) => (f.answer || '').length > 90)
+    ?? faqService.all[0];
+  if (!faq) return;
+  const localized = faqService.answerFor(faq, state.lang);
+  state.recognized = faqService.questionsFor(faq, state.lang)[0] ?? '';
+  state.answer = localized.text;
+  state.photo = '';
+  state.link = '';
+  state.isAi = false;
+  state.isFallback = localized.isFallback;
+  character.setState(CharacterState.talking);
+  render();
+}
+
+/// 質問の記録を中継サーバへ送り続ける。
+///
+/// 1件ごとに送ると通信が細切れになるので、少し間を置いてまとめて送る。
+/// 据え置き端末は電源を入れっぱなしにするため、定期的にも送る。
+function startLogSending() {
+  const send = async () => {
+    // 残りがあるうちは続けて送る（溜まっていた分を一度に片付ける）
+    while (await log.flush()) {
+      // flush が false を返すまで繰り返す
+    }
+  };
+  send();
+  setInterval(send, LOG_FLUSH_INTERVAL_MS);
+  // 閉じる直前にも送っておく（観光客の端末は見終わるとすぐ閉じられる）
+  window.addEventListener('pagehide', () => log.flush());
+}
+
+// 画面の向きが変わったときに背景を描き直す（ResizeObserver で拾えない場合の保険）
+window.addEventListener('orientationchange', () => background.draw());
+
+/// 寸法を測るための出口（tools/measure_layout.py から使う）。
+///
+/// URLに ?measure=1 が付いているときだけ、各部の大きさをページに書き出す。
+/// 目分量で直すと別の画面幅で崩れるため、数字で確かめられるようにしている。
+const MEASURE_TARGETS = {
+  '同意画面の箱': '.consent-box',
+  '同意の本文': '.consent-body',
+  '上のバー': '.appbar',
+  '題字': '.appbar h1',
+  '現在地ボタン': '.place-pill',
+  'キャラボタン': '.char-pill',
+  'データ表示': '.data-status',
+  '会話領域': '.stage',
+  'キャラクター': '.character',
+  '吹き出し': '.bubble',
+  'よくある質問': '.faq-strip',
+  '質問の帯の中身': '.faq-track',
+  '入力欄': '.typed',
+  '話すボタン': '.talk-button',
+  '言語の列': '.languages',
+  '画面全体': '.screen',
+};
+
+function writeMeasurement() {
+  const out = {
+    view: { w: innerWidth, h: innerHeight },
+    doc: { w: document.documentElement.scrollWidth },
+    items: {},
+  };
+  for (const [name, sel] of Object.entries(MEASURE_TARGETS)) {
+    const el = document.querySelector(sel);
+    if (!el) {
+      out.items[name] = null;
+      continue;
+    }
+    const r = el.getBoundingClientRect();
+    out.items[name] = {
+      w: Math.round(r.width), h: Math.round(r.height),
+      x: Math.round(r.left), y: Math.round(r.top),
+      font: getComputedStyle(el).fontSize,
+      hidden: el.hidden || getComputedStyle(el).display === 'none',
+    };
+  }
+  const pre = document.createElement('pre');
+  pre.id = 'measure-result';
+  pre.textContent = JSON.stringify(out);
+  pre.style.display = 'none';
+  document.body.appendChild(pre);
+}
+
+if (new URLSearchParams(window.location.search).get('measure') === '1') {
+  window.addEventListener('load', () => setTimeout(() => {
+    // 同意画面が出ていると後ろが測れない。
+    // 仕組みを迂回せず、「記録せずに使う」を押して先へ進める
+    // （記録は始まらないので、測定のために同意したことにはならない）。
+    const decline = document.querySelector('.consent-decline');
+    if (decline) decline.click();
+    // 押したあとの配置が落ち着いてから測る
+    setTimeout(writeMeasurement, 500);
+  }, 600));
+}
+
+
+init();

@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>画面レイアウトの編集</title>
+<!--
+  案内アプリと同じ形の絵を出し、ブロックを直接つまんで動かす画面。
+
+  【なぜ割合で持つか】
+  置いた場所を px で覚えると、別の大きさの画面に移したとたんに
+  重なるか画面の外へ出る。ここで決めるのはすべて「画面に対する割合」で、
+  7インチでも13インチでも同じ見え方になる。
+
+  【やり取り】
+  Streamlit の部品の決まりに手で合わせてある（npm を使わないため）。
+    親 → 子: streamlit:render（args が届く）
+    子 → 親: streamlit:componentReady / setFrameHeight / setComponentValue
+  動かしている間は送らず、指を離したときだけ送る（送るたびに画面が作り直されるため）。
+-->
+<style>
+  :root {
+    --green: #2C5F2D;
+    --green-dark: #1F3D20;
+    --pale: #EDF4E6;
+    --border: #C3D2BC;
+    --ink: #2B2B2B;
+    --sub: #5A6B58;
+    --accent: #3C6B3F;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Yu Gothic", "Hiragino Kaku Gothic ProN", system-ui, sans-serif;
+    color: var(--ink);
+    background: transparent;
+    font-size: 13px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* 横が足りないときは、数値の欄が下へ回る（絵をつぶさないため） */
+  .wrap { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
+  .right { min-width: 330px; }
+
+  /* ── 左：絵 ───────────────────────────────── */
+  .left { flex: none; }
+  .shapes { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; }
+  .shapes button {
+    padding: 5px 10px; font: inherit; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: #fff; color: var(--sub);
+  }
+  .shapes button.on { background: var(--green); border-color: var(--green); color: #fff; }
+
+  .device {
+    position: relative;
+    background: #fff;
+    border: 8px solid #2b2b2b;
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 6px 20px rgba(0,0,0,.18);
+  }
+  .appbar {
+    height: 8%; min-height: 22px;
+    background: var(--green); color: #fff;
+    display: flex; align-items: center; padding: 0 10px;
+    font-size: 11px; font-weight: bold;
+  }
+  .screen {
+    position: absolute; inset: 0; top: 8%;
+    display: flex; flex-direction: column;
+    padding: 4%; gap: 0;
+  }
+
+  /* ── ブロック ─────────────────────────────── */
+  .blk {
+    position: relative;
+    flex: none;
+    margin-top: 2%;
+    border-radius: 8px;
+    cursor: grab;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: var(--sub);
+    outline: 2px solid transparent;
+    transition: outline-color .12s;
+  }
+  .blk:first-child { margin-top: 0; }
+  .blk[data-key="stage"] { flex: 1 1 auto; min-height: 60px; cursor: default; }
+  .blk.dragging { opacity: .55; cursor: grabbing; }
+  .blk:hover { outline-color: var(--accent); }
+  .blk.picked { outline-color: var(--accent); }
+
+  .blk-stage { background: linear-gradient(#DCE9E6, #EAF1EC); border: 1px solid var(--border); }
+  .blk-faq   { background: var(--pale); border: 1px dashed var(--border); overflow: hidden; }
+  .blk-typed { background: #fff; border: 1px solid var(--border); }
+  .blk-talk  { background: var(--green); color: #fff; border-radius: 999px; font-weight: bold; }
+  .blk-languages { background: #fff; border: 1px solid var(--border); }
+
+  /* 下の縁をつまむと高さが変わる */
+  .grip {
+    position: absolute; left: 0; right: 0; bottom: -4px; height: 10px;
+    cursor: ns-resize;
+  }
+  .grip::after {
+    content: ""; position: absolute; left: 50%; bottom: 3px;
+    width: 34px; height: 4px; margin-left: -17px; border-radius: 2px;
+    background: var(--accent); opacity: 0; transition: opacity .12s;
+  }
+  .blk:hover .grip::after, .grip.on::after { opacity: .85; }
+
+  /* 外すボタン */
+  .off {
+    position: absolute; top: 2px; right: 3px;
+    width: 17px; height: 17px; line-height: 15px; text-align: center;
+    border-radius: 50%; border: 1px solid var(--border);
+    background: rgba(255,255,255,.92); color: var(--sub);
+    font-size: 11px; cursor: pointer; opacity: 0; transition: opacity .12s;
+  }
+  .blk:hover .off { opacity: 1; }
+  .off:hover { background: #B85042; border-color: #B85042; color: #fff; }
+
+  /* ── 会話領域の中 ─────────────────────────── */
+  /* 案内アプリ（styles.css の .stage）と同じ式で置く。
+     会話領域の縦横に対する割合（cqh・cqw）で決めるので、
+     絵の大きさが変わっても、本物と同じ見え方になる。 */
+  #stagebox {
+    position: absolute; inset: 0; overflow: hidden; border-radius: 8px;
+    container-type: size;
+    /* 立ち絵の高さ。高さいっぱい×大きさ。ただし幅の68%を超える横幅にはしない */
+    --ch: min(calc(100cqh * var(--fill) * var(--cs) * var(--ps)), calc(68cqw / var(--aspect)));
+    --cw: calc(var(--ch) * var(--aspect));
+    --cr: calc(var(--side) * (100cqw - var(--cw)));          /* 右端からの距離 */
+    --ctop: calc((100cqh - var(--ch)) * (1 - var(--rise))); /* 上端からの距離 */
+    --facer: calc(var(--cr) + var(--ch) * var(--face));     /* 顔の線（右端から） */
+    --gut: calc(16px * var(--k));
+    --tailw: calc(18px * var(--k));
+    --font: calc(clamp(calc(17px * var(--k)), min(5.1cqh, 3.7cqw), calc(46px * var(--k))) * var(--text));
+  }
+  .char {
+    position: absolute;
+    right: var(--cr);
+    bottom: calc((100cqh - var(--ch)) * var(--rise));
+    height: var(--ch); width: var(--cw);
+    cursor: grab; touch-action: none;
+    /* 吹き出しより手前に置く（大きさの取っ手が吹き出しの下に隠れないように） */
+    z-index: 2;
+  }
+  .char.dragging { cursor: grabbing; }
+  .char img { display: block; width: 100%; height: 100%; object-fit: contain; object-position: bottom; }
+  .char-shape {
+    width: 100%; height: 100%; border-radius: 40% 40% 18% 18%;
+    background: linear-gradient(#9CCB9E, #6E9A70);
+  }
+  .char-size {
+    position: absolute; top: -2px; left: -2px;
+    width: 18px; height: 18px; border-radius: 4px;
+    background: #fff; border: 2px solid var(--accent); cursor: nwse-resize;
+    box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  }
+  .bubble {
+    position: absolute; z-index: 1;
+    right: calc(var(--facer) + var(--tailw));
+    width: max(12cqw, min(calc(var(--bw) * 100cqw),
+                          calc(100cqw - var(--gut) - var(--facer) - var(--tailw) - 4px)));
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    padding: .5em .8em; font-size: var(--font); line-height: 1.6; color: var(--ink);
+    transition: opacity .15s;
+  }
+  /* 吹き出しを薄くして、後ろの立ち絵を触れるようにする */
+  body.fade .bubble { opacity: .18; pointer-events: none; }
+  /* 幅を変えるのは左の縁（右は顔の線で決まっているため動かさない） */
+  .bubble-edge {
+    position: absolute; top: 0; bottom: 0; left: -5px; width: 10px;
+    cursor: ew-resize;
+  }
+  .bubble-edge::after {
+    content: ""; position: absolute; top: 50%; left: 3px;
+    width: 4px; height: 26px; margin-top: -13px; border-radius: 2px;
+    background: var(--accent); opacity: 0; transition: opacity .12s;
+  }
+  .bubble:hover .bubble-edge::after, .bubble-edge.on::after { opacity: .85; }
+
+  /* 吹き出しの尻尾（△）。本物と同じく、口元の高さに出す。 */
+  .tail {
+    position: absolute; left: 100%; width: 0; height: 0;
+    border-style: solid; border-width: 7px 0 7px 9px;
+    border-color: transparent transparent transparent #fff;
+    filter: drop-shadow(1px 0 0 var(--border));
+  }
+  /* 口の位置の印。立ち絵の左側に出す（顔を隠さないため）。 */
+  .mouth {
+    position: absolute; width: 15px; height: 15px; margin: -7px -7px 0 0;
+    top: calc(var(--ctop) + var(--ch) * var(--mouth));
+    right: calc(var(--cr) + var(--cw));
+    border-radius: 50%; background: #fff; border: 2px solid var(--accent);
+    cursor: ns-resize; z-index: 3;
+  }
+  .mouth::after {
+    content: "口"; position: absolute; right: -1px; top: -16px;
+    font-size: 10px; color: var(--accent); white-space: nowrap;
+  }
+  /* 吹き出しがここより右へ来ないという線（顔の広さ）。 */
+  .faceline {
+    position: absolute; top: 0; bottom: 0; width: 9px; margin-right: -4px;
+    right: var(--facer);
+    cursor: ew-resize; z-index: 3;
+  }
+  .faceline::before {
+    content: ""; position: absolute; top: 0; bottom: 0; left: 4px;
+    border-left: 2px dashed var(--accent); opacity: .7;
+  }
+  .faceline::after {
+    content: "顔"; position: absolute; left: 8px; bottom: 2px;
+    font-size: 10px; color: var(--accent);
+  }
+
+  /* ── 右：つまみ ───────────────────────────── */
+  #values td.num { width: 58px; white-space: nowrap; }
+  #values td.ctl { width: 120px; padding-left: 8px; }
+  #values input[type=range] { width: 112px; margin: 0; accent-color: var(--green); cursor: pointer; }
+  .tool-btn {
+    padding: 5px 10px; font: inherit; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--sub);
+  }
+  .tool-btn.on { background: var(--pale); border-color: var(--accent); color: var(--green); }
+
+  /* ── 大きく表示しているとき ───────────────── */
+  body.big { background: #F3F6F2; padding: 14px; }
+  body.big .wrap { height: calc(100vh - 28px); }
+  body.big .right { overflow: auto; max-height: 100%; }
+
+  .big-btn {
+    margin-left: auto; padding: 5px 12px; font: inherit; cursor: pointer;
+    border: 1px solid var(--green); border-radius: 6px;
+    background: var(--green); color: #fff;
+  }
+
+  .chips { display: flex; gap: 4px; padding: 0 4px; align-items: center; height: 100%; }
+  .chip {
+    flex: none; padding: 0 7px; height: 62%; min-height: 12px;
+    border: 1px solid var(--border); border-radius: 999px;
+    background: #fff; font-size: 9px; color: var(--sub);
+    display: flex; align-items: center; white-space: nowrap;
+  }
+  .langs { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; height: 100%; }
+  .lang {
+    flex: 1 1 28%; min-width: 34px;
+    border: 1px solid var(--border); border-radius: 5px;
+    font-size: 9px; color: var(--sub);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .lang:first-child { background: var(--green); border-color: var(--green); color: #fff; }
+
+  /* 動かしている間に出す目安 */
+  .drop {
+    position: absolute; left: 4%; right: 4%; height: 3px;
+    background: var(--accent); border-radius: 2px; display: none;
+  }
+
+  /* ── 右：外したものと数値 ───────────────────── */
+  .right { flex: 1; min-width: 0; }
+  h3 { font-size: 13px; margin: 0 0 6px; color: var(--green); }
+  .tray { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; min-height: 30px; }
+  .tray button {
+    padding: 5px 10px; font: inherit; cursor: pointer;
+    border: 1px dashed var(--border); border-radius: 6px;
+    background: #fff; color: var(--sub);
+  }
+  .tray button:hover { border-color: var(--accent); color: var(--accent); }
+  .tray .none { color: #9aa; font-size: 12px; padding: 6px 0; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { padding: 3px 5px; text-align: left; border-bottom: 1px solid #eceee9; }
+  /* 見出しは折り返さない。折り返すと「キャラクターの高さ位/置」のように
+     途中で切れて読みにくくなる。入りきらないときは字を詰める。 */
+  th {
+    color: var(--sub); font-weight: normal; white-space: nowrap;
+    font-size: 11.5px; letter-spacing: -.02em;
+  }
+  td { text-align: right; font-variant-numeric: tabular-nums; }
+  .hint { color: var(--sub); font-size: 11px; line-height: 1.6; margin: 10px 0 0; }
+  .reset {
+    margin-top: 10px; padding: 5px 10px; font: inherit; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--sub);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="left">
+    <div class="shapes" id="shapes"></div>
+    <div class="device" id="device">
+      <div class="appbar">白川郷AI観光ガイド</div>
+      <div class="screen" id="screen"><div class="drop" id="drop"></div></div>
+    </div>
+  </div>
+  <div class="right">
+    <h3>出していないもの</h3>
+    <div class="tray" id="tray"></div>
+    <h3>いまの値</h3>
+    <table id="values"></table>
+    <p class="hint" id="tailNote" style="color:#B85042"></p>
+    <p class="hint">
+      <b>右のつまみ</b>を動かすと、どの値もここから直せます（絵の上で掴みにくいときに）。<br>
+      ブロックを上下に<b>つかんで入れ替え</b>、下の縁を<b>引いて高さ</b>を変えます。
+      右上の×で外し、外したものは上の札を押すと戻ります。<br>
+      立ち絵は<b>つかんで移動</b>。左上の四角を上下に引くか、立ち絵の上で<b>ホイール</b>を回すと<b>大きさ</b>
+      （1.00 で会話領域の高さいっぱい。それより上げて「高さ位置」も上げると、胸から上を大きく映せます）。<br>
+      吹き出しの左の縁を引くと<b>幅</b>が変わります。吹き出しが邪魔なときは上の「吹き出しを薄く」。<br>
+      <b>○の印</b>を上下に引くと△の向く先（口の位置）、
+      <b>縦の点線</b>を左右に引くと吹き出しが顔にどこまで近づけるかが変わります。
+    </p>
+    <button class="reset" id="reset" type="button">はじめの状態に戻す</button>
+  </div>
+</div>
+
+<script>
+// ── Streamlit とのやり取り ──────────────────────────────
+function send(type, extra) {
+  window.parent.postMessage(
+    Object.assign({ isStreamlitMessage: true, type: type }, extra || {}), "*");
+}
+let rev = "";   // いまの設定の指紋（管理画面から受け取り、返す値に付ける）
+function setValue(v) {
+  send("streamlit:setComponentValue", { value: Object.assign({}, v, { rev: rev }), dataType: "json" });
+}
+function setHeight(h) {
+  send("streamlit:setFrameHeight", { height: h });
+}
+
+// ── 画面の形 ────────────────────────────────────────
+const SHAPES = [
+  { id: "tablet-v", label: "タブレット（縦）", w: 1024, h: 1366 },
+  { id: "tablet-h", label: "タブレット（横）", w: 1366, h: 1024 },
+  { id: "phone", label: "スマートフォン", w: 393, h: 852 },
+];
+
+// ブロックの名前。案内アプリ（js/layout.js）と同じ印を使う。
+const BLOCKS = {
+  stage: "会話領域",
+  faq: "よくある質問",
+  typed: "文字で質問する",
+  talk: "話すボタン",
+  languages: "言語",
+};
+// 高さを決められるもの（会話領域は残り全部を使う）
+const SIZED = ["faq", "typed", "talk", "languages"];
+// 高さを決めていないときの見た目（割合）。案内アプリの既定に近い値。
+const AUTO_H = { faq: 0.05, typed: 0.06, talk: 0.09, languages: 0.11 };
+
+let dragging = false;   // いま何かをつまんでいるか（作り直しを止めるため）
+let value = null;       // いまの設定
+let first = null;       // はじめの設定（戻すため）
+let shape = SHAPES[0];
+let character = {};
+const screen = document.getElementById("screen");
+const device = document.getElementById("device");
+const drop = document.getElementById("drop");
+
+// ── 絵を作る ────────────────────────────────────────
+let big = false;   // 大きく表示しているか
+
+/// 絵の大きさ。空いている場所いっぱいまで使う。
+///
+/// 小さいと、尻尾の向きや吹き出しの端といった細かい所が合わせられない。
+/// 一方で横に広げすぎると、右の数値の欄がつぶれる。
+/// そこで「高さは目一杯、ただし幅は空きの半分強まで」にしている。
+function previewHeight() {
+  if (big) return Math.max(420, Math.round(window.innerHeight - 110));
+
+  // ふだんの表示。画面の下にはみ出さない高さにする。
+  //
+  // はみ出すと、下のブロック（話すボタン・言語）の縁に手が届かず、
+  // いちいち巻き下ろしてからつままなければならない。
+  // 入れ物が画面のどこから始まっているかを見て、そこから下の余りに収める。
+  let room = 640;
+  try {
+    const top = window.frameElement
+      ? window.frameElement.getBoundingClientRect().top : 420;
+    room = Math.round(window.parent.innerHeight - top - 46);
+  } catch (_) {
+    // 親の窓を見られないときは既定のまま
+  }
+  // 札の行のぶんを引く
+  return Math.min(900, Math.max(420, room - 44));
+}
+
+/// 数値の欄に残しておく幅。これより狭くすると見出しが崩れて読めない。
+const NUMBERS_W = 330;
+/// これより小さい絵では、細かい所を合わせられない
+const MIN_PREVIEW_H = 480;
+
+function fit() {
+  const avail = document.body.clientWidth || 700;
+  const gap = 18;
+
+  let h = previewHeight();
+  let w = h * shape.w / shape.h;
+
+  // まず「数値の欄を横に残したまま」で入るかを見る
+  const beside = avail - gap - NUMBERS_W;
+  if (w > beside) {
+    const shrunk = beside * shape.h / shape.w;
+    if (shrunk >= MIN_PREVIEW_H || big) {
+      // 少し縮めれば横に並べられる
+      w = beside;
+      h = shrunk;
+    } else {
+      // 縮めすぎになるので、絵を優先して数値は下へ回す
+      w = Math.min(w, avail);
+      h = w * shape.h / shape.w;
+    }
+  }
+  device.style.height = Math.round(h) + "px";
+  device.style.width = Math.round(w) + "px";
+}
+
+/// 大きく表示する。全画面にできる所では全画面にし、
+/// 断られた所（設定で止めている場合など）は枠を伸ばすだけにする。
+function toggleBig() {
+  big = !big;
+  document.body.classList.toggle("big", big);
+  const label = document.getElementById("bigLabel");
+  if (label) label.textContent = big ? "もとの大きさに戻す" : "大きく表示";
+
+  if (big && document.fullscreenEnabled && !document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  } else if (!big && document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+  // 全画面にならなかった所でも使えるよう、枠の高さは自分で伝える
+  setTimeout(() => { render(); tellHeight(); }, 120);
+}
+
+document.addEventListener("fullscreenchange", () => {
+  // 画面の端の×や Esc で抜けたときも、見た目を戻す
+  if (!document.fullscreenElement && big) {
+    big = false;
+    document.body.classList.remove("big");
+    const label = document.getElementById("bigLabel");
+    if (label) label.textContent = "大きく表示";
+    render();
+    tellHeight();
+  }
+});
+
+function tellHeight() {
+  setHeight(big ? Math.max(560, window.innerHeight)
+                : document.body.scrollHeight + 8);
+}
+
+function heightOf(key) {
+  const v = Number(value.heights[key] || 0);
+  return v > 0 ? v : AUTO_H[key];
+}
+
+function render() {
+  fit();
+  // いったん消して作り直す（並び順が変わるため）
+  for (const el of [...screen.querySelectorAll(".blk")]) el.remove();
+
+  const order = value.order.length ? value.order : ["stage"];
+  for (const key of order) {
+    const el = document.createElement("div");
+    el.className = "blk blk-" + key;
+    el.dataset.key = key;
+    if (key !== "stage") el.style.height = (heightOf(key) * 100) + "%";
+
+    if (key === "stage") el.appendChild(stageInside());
+    else if (key === "faq") el.innerHTML =
+      '<div class="chips"><div class="chip">駐車料金</div>'
+      + '<div class="chip">入村料はいくら</div><div class="chip">トイレ</div></div>';
+    else if (key === "talk") el.textContent = "話す";
+    else if (key === "typed") el.textContent = "キーボードで質問する";
+    else if (key === "languages") el.innerHTML =
+      '<div class="langs"><div class="lang">日本語</div><div class="lang">English</div>'
+      + '<div class="lang">中文</div><div class="lang">한국어</div>'
+      + '<div class="lang">Español</div><div class="lang">Français</div></div>';
+
+    if (key !== "stage") {
+      const off = document.createElement("div");
+      off.className = "off";
+      off.textContent = "×";
+      off.title = "この端末では出さない";
+      off.onclick = (e) => { e.stopPropagation(); remove(key); };
+      el.appendChild(off);
+
+      const grip = document.createElement("div");
+      grip.className = "grip";
+      grip.title = "引くと高さが変わります";
+      grip.addEventListener("pointerdown", (e) => startResize(e, key, grip));
+      el.appendChild(grip);
+    }
+
+    el.addEventListener("pointerdown", (e) => startMove(e, key, el));
+    screen.appendChild(el);
+  }
+  renderTray();
+  renderValues();
+  lastWidth = document.body.clientWidth;
+  // 絵の大きさが変わると、入れ物の高さも変わる。
+  // 伝え忘れると、下に回った数値の欄が枠からはみ出して見えなくなる。
+  tellHeight();
+}
+
+/// 会話領域の中（立ち絵・口の印・顔の線・吹き出し・尻尾）。
+///
+/// 位置の式は CSS（#stagebox）にあり、案内アプリの styles.css と同じ。
+/// ここでは、その式に入れる数（大きさ・高さ位置・口の高さ など）を渡すだけ。
+/// ここを本物とずらすと、見ながら合わせた意味が無くなる。
+function stageInside() {
+  const box = document.createElement("div");
+  box.id = "stagebox";
+  setVars(box);
+
+  // 立ち絵
+  const ch = document.createElement("div");
+  ch.className = "char";
+  ch.title = "つかんで移動、左上の四角かホイールで大きさ";
+  ch.innerHTML = character.url
+    ? '<img src="' + character.url + '" alt="" draggable="false">'
+    : '<div class="char-shape"></div>';
+  const sizeGrip = document.createElement("div");
+  sizeGrip.className = "char-size";
+  sizeGrip.title = "上下に引くと大きさが変わります";
+  sizeGrip.addEventListener("pointerdown", startCharSize);
+  ch.appendChild(sizeGrip);
+  ch.addEventListener("pointerdown", (e) => startCharMove(e, ch));
+  ch.addEventListener("wheel", wheelSize, { passive: false });
+  box.appendChild(ch);
+
+  // 口の位置（立ち絵の左端の高さに置く。顔を隠さないため）
+  const mouth = document.createElement("div");
+  mouth.className = "mouth";
+  mouth.title = "上下に引くと、尻尾の向く先が変わります";
+  mouth.addEventListener("pointerdown", startMouth);
+  box.appendChild(mouth);
+
+  // 顔の線（吹き出しがここより右へ来ない）
+  const face = document.createElement("div");
+  face.className = "faceline";
+  face.title = "左右に引くと、吹き出しが顔にどこまで近づけるかが変わります";
+  face.addEventListener("pointerdown", startFace);
+  box.appendChild(face);
+
+  // 吹き出し。実際の回答くらいの長さの文で、文字の大きさも確かめられるようにする。
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = "お手洗いのご案内は、村内マップをご覧ください。車椅子でご利用いただけるトイレは村内に5か所ございます。";
+
+  const edge = document.createElement("div");
+  edge.className = "bubble-edge";
+  edge.title = "引くと吹き出しの幅が変わります";
+  edge.addEventListener("pointerdown", (e) => startBubble(e, edge));
+  b.appendChild(edge);
+
+  const tail = document.createElement("div");
+  tail.className = "tail";
+  b.appendChild(tail);
+  box.appendChild(b);
+
+  // 吹き出しの高さは描いてから分かるので、尻尾の位置は後で合わせる
+  requestAnimationFrame(placeTail);
+  return box;
+}
+
+/// 画面の縮み具合（編集画面の絵 ÷ 本物の画面）。px で決まっている余白や文字に掛ける。
+function shrink() {
+  return (device.clientWidth || shape.w) / shape.w;
+}
+const isPhone = () => shape.w <= 720;
+/// 吹き出しの幅。決めていないときは、案内アプリの既定（狭い画面は目一杯、広い画面は46%）。
+function bubbleWidth() {
+  return value.bubble.width > 0 ? value.bubble.width : (isPhone() ? 1 : 0.46);
+}
+
+/// 式に入れる数を、会話領域に渡す
+function setVars(box) {
+  const c = value.character;
+  const vars = {
+    "--k": shrink(),
+    // 狭い画面では、案内アプリは高さの90%までにしている（--char-fill）
+    "--fill": isPhone() ? 0.9 : 1,
+    "--cs": character.scale || 1,       // 絵ごとの大きさ（キャラクターシート）
+    "--ps": c.scale,                    // この端末の倍率
+    "--aspect": character.aspect || 0.45,
+    "--rise": c.rise,
+    "--side": c.side,
+    "--mouth": value.tail.mouth,
+    "--face": value.tail.face,
+    "--bw": bubbleWidth(),
+    "--text": value.bubble.text || 1,
+  };
+  for (const [name, v] of Object.entries(vars)) box.style.setProperty(name, String(v));
+}
+
+/// 数が変わったときに、会話領域と数値の欄だけを合わせ直す（作り直さない）
+function update() {
+  const box = document.getElementById("stagebox");
+  if (box) setVars(box);
+  placeTail();
+  renderValues();
+}
+
+/// 吹き出しの置き場所と、尻尾の高さ。案内アプリの式（--q-space・--bubble-min・--talk-drop）と同じ。
+///
+/// 吹き出しの上には「質問」の札のぶんを空け、口元まで届くように伸ばす。
+/// 伸ばしても届かないほど口が下にあるときは、吹き出しごと下へずらす。
+function placeTail() {
+  const box = document.getElementById("stagebox");
+  if (!box) return;
+  const bubble = box.querySelector(".bubble");
+  const tail = box.querySelector(".tail");
+  const mark = box.querySelector(".mouth");
+  const sr = box.getBoundingClientRect();
+  if (!sr.height) return;
+
+  const k = shrink();
+  const mr = mark.getBoundingClientRect();
+  const mouthY = mr.top + mr.height / 2 - sr.top;
+  const font = parseFloat(getComputedStyle(bubble).fontSize) || 12;
+  const gut = 16 * k;
+  const talkTop = gut + clamp(font * 1.8, 32 * k, 64 * k);
+  const fromTalk = Math.max(0, mouthY - talkTop);
+  const least = clamp(fromTalk + 32 * k, 88 * k, 0.34 * sr.height);
+  const drop = Math.max(0, fromTalk + 32 * k - least);
+  bubble.style.top = (talkTop + drop) + "px";
+  bubble.style.minHeight = least + "px";
+
+  const br = bubble.getBoundingClientRect();
+  const y = clamp(fromTalk - drop, 6, Math.max(6, br.height - 20));
+  tail.style.top = (y - 7) + "px";
+  const reaches = Math.abs(br.top + y - (sr.top + mouthY)) < 3 && mouthY < sr.height;
+  tail.style.opacity = reaches ? "1" : ".35";
+  tail.title = reaches ? "" : "口が会話領域の外にあるため、尻尾が届きません";
+
+  // 気づけるように、数値の欄の下にも出す
+  const notes = [];
+  if (!reaches) notes.push("※ いまの大きさ・位置では尻尾が口に届きません");
+  const ch = box.querySelector(".char").getBoundingClientRect();
+  const want = sr.height * (isPhone() ? 0.9 : 1) * (character.scale || 1) * value.character.scale;
+  if (ch.height < want - 2) notes.push("※ 画面の幅いっぱいのため、立ち絵はこれ以上大きくなりません");
+  if (ch.top < sr.top - 2) notes.push("※ 立ち絵の上が切れています。大きく映すときは「高さ位置」を上げると顔が入ります");
+  const note = document.getElementById("tailNote");
+  if (note) note.textContent = notes.join("　");
+}
+
+function renderTray() {
+  const tray = document.getElementById("tray");
+  const out = Object.keys(BLOCKS).filter((k) => !value.order.includes(k));
+  if (!out.length) {
+    tray.innerHTML = '<div class="none">ありません（すべて出しています）</div>';
+    return;
+  }
+  tray.innerHTML = "";
+  for (const key of out) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "＋ " + BLOCKS[key];
+    b.onclick = () => add(key);
+    tray.appendChild(b);
+  }
+}
+
+/// 数値の欄の行。つまみ（スライダー）のある行は、そのまま数を動かせる。
+///
+/// 絵の上の取っ手は、吹き出しや他のブロックの下に隠れて掴みにくいことがある。
+/// そのため、すべての値をここからも直せるようにしている。
+function valueRows() {
+  const rows = [{ label: "並び順", text: value.order.map((k) => BLOCKS[k]).join(" → ") }];
+  for (const key of SIZED) {
+    if (!value.order.includes(key)) continue;
+    const v = Number(value.heights[key] || 0);
+    rows.push({
+      label: BLOCKS[key] + "の高さ", text: v > 0 ? (v * 100).toFixed(0) + "%" : "決めない",
+      min: 0.03, max: 0.6, step: 0.005, get: () => heightOf(key),
+      set: (x) => {
+        value.heights[key] = x;
+        const el = screen.querySelector('.blk[data-key="' + key + '"]');
+        if (el) el.style.height = (x * 100) + "%";
+      },
+    });
+  }
+  const c = () => value.character;
+  rows.push({ label: "キャラクターの大きさ", text: c().scale.toFixed(2),
+              min: 0.2, max: 2, step: 0.01, get: () => c().scale, set: (x) => { c().scale = x; } });
+  rows.push({ label: "キャラクターの高さ位置", text: c().rise.toFixed(2),
+              min: 0, max: 1, step: 0.01, get: () => c().rise, set: (x) => { c().rise = x; } });
+  rows.push({ label: "キャラクターの左右位置", text: c().side.toFixed(2),
+              min: 0, max: 1, step: 0.01, get: () => 1 - c().side, set: (x) => { c().side = 1 - x; },
+              tip: "右へ動かすほど右に寄ります" });
+  rows.push({ label: "吹き出しの幅",
+              text: value.bubble.width > 0 ? (value.bubble.width * 100).toFixed(0) + "%" : "決めない",
+              min: 0.2, max: 1, step: 0.01, get: bubbleWidth, set: (x) => { value.bubble.width = x; } });
+  rows.push({ label: "文字の大きさ", text: (value.bubble.text || 1).toFixed(2),
+              min: 0.6, max: 2, step: 0.05, get: () => value.bubble.text || 1,
+              set: (x) => { value.bubble.text = x; } });
+  rows.push({ label: "△ 口の高さ", text: value.tail.mouth.toFixed(2),
+              min: 0.02, max: 0.9, step: 0.005, get: () => value.tail.mouth,
+              set: (x) => { value.tail.mouth = x; } });
+  rows.push({ label: "△ 顔の広さ", text: value.tail.face.toFixed(2),
+              min: 0.05, max: 1.2, step: 0.005, get: () => value.tail.face,
+              set: (x) => { value.tail.face = x; } });
+  return rows;
+}
+
+function renderValues() {
+  const table = document.getElementById("values");
+  const rows = valueRows();
+  const sig = rows.map((r) => r.label).join("|");
+
+  // 行の並びが同じなら、数だけ書き換える（動かしているつまみを作り直さないため）
+  if (table.dataset.sig === sig) {
+    rows.forEach((r, i) => {
+      const tr = table.rows[i];
+      tr.cells[1].textContent = r.text;
+      const s = tr.querySelector("input");
+      if (s && document.activeElement !== s) s.value = String(r.get());
+    });
+    return;
+  }
+  table.dataset.sig = sig;
+  table.innerHTML = "";
+  rows.forEach((r, i) => {
+    const tr = table.insertRow();
+    const th = document.createElement("th");
+    th.textContent = r.label;
+    tr.appendChild(th);
+    const num = tr.insertCell();
+    num.className = "num";
+    num.textContent = r.text;
+    if (r.min === undefined) { num.colSpan = 2; return; }
+    const ctl = tr.insertCell();
+    ctl.className = "ctl";
+    const s = document.createElement("input");
+    s.type = "range";
+    s.min = r.min; s.max = r.max; s.step = r.step;
+    s.value = String(r.get());
+    s.title = r.tip || r.label;
+    s.setAttribute("aria-label", r.label);
+    // 動かしている間は絵だけ合わせ、離したときに送る（送るたびに画面が作り直されるため）
+    s.addEventListener("input", () => { valueRows()[i].set(Number(s.value)); update(); });
+    s.addEventListener("change", () => { s.blur(); update(); commit(); });
+    ctl.appendChild(s);
+  });
+}
+
+// ── 動かす ──────────────────────────────────────────
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+/// 指を離したときだけ送る（送るたびに画面が作り直されるため）
+function commit() { setValue(value); }
+
+function remove(key) {
+  value.order = value.order.filter((k) => k !== key);
+  render();
+  commit();
+}
+
+function add(key) {
+  // もとの並びの位置に戻す（適当な所に挟まないように）
+  const base = ["stage", "faq", "typed", "talk", "languages"];
+  const want = base.indexOf(key);
+  const at = value.order.findIndex((k) => base.indexOf(k) > want);
+  if (at < 0) value.order.push(key);
+  else value.order.splice(at, 0, key);
+  render();
+  commit();
+}
+
+/// つまんで動かす共通の流れ。move には、押した所からのずれ（dx, dy）が渡る。
+function track(event, move, el) {
+  event.preventDefault();
+  event.stopPropagation();
+  dragging = true;
+  if (el) el.classList.add(el.classList.contains("grip") ? "on" : "dragging");
+  const from = { x: event.clientX, y: event.clientY };
+  const onMove = (e) => { move(e.clientX - from.x, e.clientY - from.y); update(); };
+  const end = () => {
+    dragging = false;
+    if (el) el.classList.remove("on", "dragging");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", end);
+    commit();
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", end);
+}
+
+function startResize(event, key, grip) {
+  const box = screen.getBoundingClientRect();
+  const base = heightOf(key);
+  track(event, (dx, dy) => {
+    value.heights[key] = clamp(base + dy / box.height, 0.03, 0.6);
+    const el = screen.querySelector('.blk[data-key="' + key + '"]');
+    if (el) el.style.height = (value.heights[key] * 100) + "%";
+  }, grip);
+}
+
+function startMove(event, key, el) {
+  if (event.target.closest(".grip, .off, .char, .bubble, .mouth, .faceline")) return;
+  if (key === "stage") return;        // 会話領域は常にあるので動かさない
+  event.preventDefault();
+  dragging = true;
+  el.classList.add("dragging");
+  drop.style.display = "block";
+  let to = value.order.indexOf(key);
+
+  const move = (e) => {
+    // いま指が重なっているブロックの位置を探す
+    const blocks = [...screen.querySelectorAll(".blk")];
+    let at = value.order.indexOf(key);
+    for (const b of blocks) {
+      const r = b.getBoundingClientRect();
+      if (e.clientY >= r.top && e.clientY <= r.bottom) {
+        at = value.order.indexOf(b.dataset.key);
+        // 会話領域の上には置けない（必ず最初に来る）
+        if (b.dataset.key === "stage") at = e.clientY < r.top + r.height / 2 ? 0 : 1;
+        break;
+      }
+    }
+    to = clamp(at, 0, value.order.length - 1);
+    const target = blocks[to];
+    if (target) {
+      const r = target.getBoundingClientRect();
+      const sr = screen.getBoundingClientRect();
+      drop.style.top = (r.top - sr.top - 2) + "px";
+    }
+  };
+  const end = () => {
+    dragging = false;
+    el.classList.remove("dragging");
+    drop.style.display = "none";
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", end);
+    const at = value.order.indexOf(key);
+    if (to !== at) {
+      value.order.splice(at, 1);
+      value.order.splice(to, 0, key);
+      // 会話領域は必ず先頭（これが下にあると画面が成り立たない）
+      value.order = value.order.filter((k) => k !== "stage");
+      value.order.unshift("stage");
+      render();
+      commit();
+    }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", end);
+}
+
+function startCharMove(event, ch) {
+  if (event.target.closest(".char-size")) return;
+  const stage = ch.parentElement.getBoundingClientRect();
+  const size = ch.getBoundingClientRect();
+  const base = { side: value.character.side, rise: value.character.rise };
+  const roomX = Math.max(1, stage.width - size.width);
+  const roomY = Math.max(1, stage.height - size.height);
+  track(event, (dx, dy) => {
+    // 左へ引くほど side が増える（0＝右端、1＝左端）
+    value.character.side = clamp(base.side - dx / roomX, 0, 1);
+    // 上へ引くほど rise が増える（0＝下端、1＝上端）
+    value.character.rise = clamp(base.rise - dy / roomY, 0, 1);
+  }, ch);
+}
+
+/// 大きさ。上へ引くほど大きくなる（1.00 で会話領域の高さいっぱい。それ以上は下が切れる）
+function startCharSize(event) {
+  const stage = document.getElementById("stagebox").getBoundingClientRect();
+  const per = Math.max(1, stage.height * (isPhone() ? 0.9 : 1) * (character.scale || 1));
+  const base = value.character.scale;
+  track(event, (dx, dy) => {
+    value.character.scale = clamp(base - dy / per, 0.2, 2);
+  });
+}
+
+/// 立ち絵の上でホイールを回しても、大きさが変わる
+let wheelTimer = null;
+function wheelSize(e) {
+  e.preventDefault();
+  value.character.scale = clamp(value.character.scale - e.deltaY * 0.001, 0.2, 2);
+  update();
+  clearTimeout(wheelTimer);
+  wheelTimer = setTimeout(commit, 500);
+}
+
+/// 口の位置。上下に引くと、尻尾の向く先が変わる。
+///
+/// これは「絵のどこに口があるか」なので、設置場所ごとではなく絵ごとの値。
+/// 据え置きでも観光客の端末でも、同じ絵なら口の位置は同じ。
+function startMouth(event) {
+  const charH = document.querySelector("#stagebox .char").getBoundingClientRect().height;
+  const base = value.tail.mouth;
+  track(event, (dx, dy) => {
+    if (charH >= 1) value.tail.mouth = clamp(base + dy / charH, 0.02, 0.9);
+  });
+}
+
+/// 顔の広さ。左へ引くほど、吹き出しが顔から離れる。
+function startFace(event) {
+  const charH = document.querySelector("#stagebox .char").getBoundingClientRect().height;
+  const base = value.tail.face;
+  track(event, (dx) => {
+    if (charH >= 1) value.tail.face = clamp(base - dx / charH, 0.05, 1.2);
+  });
+}
+
+/// 吹き出しの幅。左へ引くほど広がる（右端は顔の線で決まっているため）
+function startBubble(event, edge) {
+  const stage = document.getElementById("stagebox").getBoundingClientRect();
+  const base = bubbleWidth();
+  track(event, (dx) => {
+    value.bubble.width = clamp(base - dx / stage.width, 0.2, 1);
+  }, edge);
+}
+
+/// 吹き出しを薄くして、後ろの立ち絵や取っ手を触れるようにする
+function toggleFade() {
+  const on = document.body.classList.toggle("fade");
+  const b = document.getElementById("fadeBtn");
+  if (b) {
+    b.classList.toggle("on", on);
+    b.textContent = on ? "吹き出しを戻す" : "吹き出しを薄く";
+  }
+}
+
+/// 会話領域の中だけ描き直す
+function redrawStage() {
+  const stage = screen.querySelector('.blk[data-key="stage"]');
+  if (!stage) return;
+  const old = stage.querySelector("#stagebox");
+  if (old) old.remove();
+  stage.insertBefore(stageInside(), stage.firstChild);
+  renderValues();
+}
+
+// ── 画面の形を選ぶ札 ────────────────────────────────
+function renderShapes() {
+  const box = document.getElementById("shapes");
+  box.innerHTML = "";
+  for (const s of SHAPES) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = s.label;
+    if (s.id === shape.id) b.className = "on";
+    b.onclick = () => { shape = s; renderShapes(); render(); };
+    box.appendChild(b);
+  }
+  const fade = document.createElement("button");
+  fade.type = "button";
+  fade.id = "fadeBtn";
+  const faded = document.body.classList.contains("fade");
+  fade.className = "tool-btn" + (faded ? " on" : "");
+  fade.textContent = faded ? "吹き出しを戻す" : "吹き出しを薄く";
+  fade.title = "吹き出しの下に隠れた立ち絵や取っ手を触れるようにします";
+  fade.onclick = toggleFade;
+  box.appendChild(fade);
+
+  const big = document.createElement("button");
+  big.type = "button";
+  big.className = "big-btn";
+  big.innerHTML = '<span id="bigLabel">大きく表示</span>';
+  big.title = "画面いっぱいに広げて、細かく合わせられます";
+  big.onclick = toggleBig;
+  box.appendChild(big);
+}
+
+document.getElementById("reset").onclick = () => {
+  value = JSON.parse(JSON.stringify(first));
+  render();
+  commit();
+};
+
+// ── Streamlit から値を受け取る ──────────────────────
+let started = false;
+window.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "streamlit:render") return;
+  const args = event.data.args || {};
+
+  // 2回目以降（自分が送った値が返ってくる）は作り直さない。
+  // 作り直すと、つまんでいる最中に位置が飛ぶ。
+  // ただし、保存や読み直しで設定そのものが変わったとき（指紋が違う）は、
+  // 新しい設定で作り直す。古い設定のまま動かすと、保存で上書きしてしまう。
+  if (started && (args.rev || "") === rev) { tellHeight(); return; }
+  started = true;
+  rev = args.rev || "";
+
+  value = JSON.parse(JSON.stringify(args.value || {}));
+  value.order = value.order || ["stage"];
+  value.heights = value.heights || {};
+  value.character = Object.assign({ scale: 1, rise: 0, side: 0 }, value.character || {});
+  value.bubble = Object.assign({ width: 0, text: 1 }, value.bubble || {});
+  // 尻尾（△）の向く先。絵ごとの値で、設置場所では変わらない。
+  value.tail = Object.assign({ mouth: 0.14, face: 0.31 }, value.tail || {});
+  first = JSON.parse(JSON.stringify(value));
+  character = args.character || {};
+
+  // 設置場所に合う形を先に出す（据え置きならタブレット）
+  const want = (args.shape || {}).id;
+  shape = SHAPES.find((s) => s.id === want) || SHAPES[0];
+
+  renderShapes();
+  render();
+  tellHeight();
+});
+
+// 窓の大きさが変わったら、絵の大きさも合わせ直す
+// 窓の幅が変わったときだけ作り直す。
+//
+// 高さは自分で親に伝えているので、その結果の resize で作り直すと
+// 「伝える→resize→作り直す→また伝える」の堂々巡りになる。
+// さらに、つまんでいる最中に作り直すと指が離れてしまう。
+let lastWidth = 0;
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const w = document.body.clientWidth;
+    if (w === lastWidth || dragging) return;
+    lastWidth = w;
+    render();
+  }, 150);
+});
+
+send("streamlit:componentReady", { apiVersion: 1 });
+setHeight(560);
+</script>
+</body>
+</html>

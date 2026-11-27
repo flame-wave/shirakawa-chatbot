@@ -1,0 +1,7 @@
+# 実際の運用データ・秘密情報は公開用リポジトリに入れない
+server/api/config.php
+server/api/data/*.jsonl
+tools/faq_master.xlsx
+__pycache__/
+*.pyc
+.DS_Store
